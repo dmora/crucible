@@ -1,0 +1,6 @@
+[38;2;72;144;112m✓[m [38;2;104;144;184mAgentic Fetch[m [38;2;88;96;104mhttps://example.com/api/docs[m            
+                                                        
+  [48;2;72;144;112m [m[1;38;2;42;48;56;48;2;72;144;112mPrompt[m[48;2;72;144;112m [m [38;2;128;136;144mRetrieve the API documentation and summarize[m 
+           [38;2;128;136;144mthe key endpoints[m                            
+  ├───── [38;2;128;136;144m[m[38;2;72;144;112m✓[m [38;2;164;172;184mRead[m [38;2;88;96;104m{"path":"/src/very/long/file/path/that/…[m
+  ╰───── [38;2;128;136;144m[m[38;2;72;144;112m✓[m [38;2;164;172;184mBash[m [38;2;88;96;104m{"command":"echo hello world"}[m

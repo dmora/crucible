@@ -1,0 +1,6 @@
+[38;2;72;144;112m✓[m [38;2;104;144;184mAgent[m                                                 
+                                                        
+  [48;2;144;184;212m [m[1;38;2;220;224;230;48;2;144;184;212mTask[m[48;2;144;184;212m [m [38;2;128;136;144mSearch for all files related to authentication[m 
+         [38;2;128;136;144mand analyze their structure[m                    
+  ├─── [38;2;128;136;144m[m[38;2;72;144;112m✓[m [38;2;164;172;184mRead[m [38;2;88;96;104m{"path":"/src/very/long/file/path/that/ma…[m
+  ╰─── [38;2;128;136;144m[m[38;2;72;144;112m✓[m [38;2;164;172;184mBash[m [38;2;88;96;104m{"command":"echo hello world"}[m

@@ -1,0 +1,82 @@
+package format
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"os"
+
+	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
+	"github.com/dmora/crucible/internal/ui/anim"
+)
+
+// Spinner wraps the bubbles spinner for non-interactive mode
+type Spinner struct {
+	done chan struct{}
+	prog *tea.Program
+}
+
+type model struct {
+	cancel context.CancelFunc
+	anim   anim.SpinnerBackend
+}
+
+func (m model) Init() tea.Cmd  { return m.anim.Start() }
+func (m model) View() tea.View { return tea.NewView(m.anim.Render()) }
+
+// Update implements tea.Model.
+func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyPressMsg:
+		switch msg.String() {
+		case "ctrl+c", "esc":
+			m.cancel()
+			return m, tea.Quit
+		}
+	case anim.StepMsg:
+		cmd := m.anim.Animate(msg)
+		return m, cmd
+	}
+	return m, nil
+}
+
+// NewSpinner creates a new spinner with the given message
+func NewSpinner(ctx context.Context, cancel context.CancelFunc, preset string, animSettings anim.Settings) *Spinner {
+	backend, err := anim.NewSpinner(preset, animSettings)
+	if err != nil {
+		slog.Warn("invalid spinner preset, falling back to industrial", "preset", preset, "err", err)
+		backend = anim.New(animSettings)
+	}
+	m := model{
+		anim:   backend,
+		cancel: cancel,
+	}
+
+	p := tea.NewProgram(m, tea.WithOutput(os.Stderr), tea.WithContext(ctx))
+
+	return &Spinner{
+		prog: p,
+		done: make(chan struct{}, 1),
+	}
+}
+
+// Start begins the spinner animation
+func (s *Spinner) Start() {
+	go func() {
+		defer close(s.done)
+		_, err := s.prog.Run()
+		// ensures line is cleared
+		fmt.Fprint(os.Stderr, ansi.EraseEntireLine)
+		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, tea.ErrInterrupted) {
+			fmt.Fprintf(os.Stderr, "Error running spinner: %v\n", err)
+		}
+	}()
+}
+
+// Stop ends the spinner animation
+func (s *Spinner) Stop() {
+	s.prog.Quit()
+	<-s.done
+}

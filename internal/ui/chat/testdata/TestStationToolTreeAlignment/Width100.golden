@@ -1,0 +1,10 @@
+[38;2;72;144;112m✓[m [38;2;104;144;184mDraft[m[38;2;128;136;144m · [m[38;2;88;96;104mDone[m                                                                                    
+                                                                                                  
+  [48;2;144;184;212m [m[1;38;2;220;224;230;48;2;144;184;212mTask[m[48;2;144;184;212m [m [38;2;128;136;144mImplement the new feature for handling user authentication with OAuth2 tokens[m            
+  ├─── [38;2;88;96;104mAnalyzing the repository structure and understanding how the modules connect together[m      
+  ├─── [38;2;88;96;104mReading testbench.go[m                                                                       
+  ├─── [38;2;88;96;104mBuilding[m                                                                                   
+  ├─── [38;2;88;96;104mError: permission denied: cannot write to read-only filesystem path[m                        
+  ╰─── [38;2;88;96;104mShort thought[m                                                                              
+                                                                                                  
+[38;2;88;96;104m[38;2;88;96;104mDone[m[38;2;128;136;144m · [m[38;2;144;56;72m1 errors[m[38;2;128;136;144m · [m[38;2;88;96;104m1 files read[m[38;2;128;136;144m · [m[38;2;88;96;104m1 commands[m[m                                                       
