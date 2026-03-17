@@ -41,6 +41,11 @@ homebrew_casks:
       fish: completions/crucible.fish
     homepage: "https://github.com/dmora/crucible"
     description: "Autonomous software development orchestrator"
+    caveats: "If macOS blocks the binary, run: xattr -d com.apple.quarantine $(which crucible)"
+    hooks:
+      post:
+        install: |
+          system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/crucible"]
     repository:
       owner: dmora
       name: homebrew-tap
