@@ -1,0 +1,63 @@
+version: 2
+project_name: crucible
+
+before:
+  hooks:
+    - go mod tidy
+    - sh -c 'rm -rf completions && mkdir -p completions && go run . completion bash > completions/crucible.bash && go run . completion zsh > completions/crucible.zsh && go run . completion fish > completions/crucible.fish'
+
+builds:
+  - env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - freebsd
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X github.com/dmora/crucible/internal/version.Version={{.Version}}
+    flags:
+      - -trimpath
+
+archives:
+  - name_template: >-
+      crucible_{{.Version}}_{{title .Os}}_
+      {{- if eq .Arch "amd64"}}x86_64{{else}}{{.Arch}}{{end}}
+    wrap_in_directory: true
+    files:
+      - README*
+      - LICENSE*
+      - completions/*
+
+homebrew_casks:
+  - name: crucible
+    binaries:
+      - crucible
+    completions:
+      bash: completions/crucible.bash
+      zsh: completions/crucible.zsh
+      fish: completions/crucible.fish
+    homepage: "https://github.com/dmora/crucible"
+    description: "Autonomous software development orchestrator"
+    repository:
+      owner: dmora
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    commit_author:
+      name: crucible-bot
+      email: crucible-bot@users.noreply.github.com
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^deps"
+      - "^chore"
+      - "^test"
+      - Merge pull request
