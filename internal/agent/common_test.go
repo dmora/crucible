@@ -24,6 +24,12 @@ type fakeEnv struct {
 }
 
 func testEnv(t *testing.T) fakeEnv {
+	// Ensure a provider is available so config.Init/Load succeeds in CI
+	// where no real credentials exist.
+	if os.Getenv("GEMINI_API_KEY") == "" && os.Getenv("GOOGLE_CLOUD_PROJECT") == "" {
+		t.Setenv("GEMINI_API_KEY", "fake-key-for-test")
+	}
+
 	workingDir := filepath.Join("/tmp/crucible-test/", t.Name())
 	os.RemoveAll(workingDir)
 
