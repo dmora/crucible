@@ -28,7 +28,7 @@ func SkipHidden(path string) bool {
 	}
 
 	commonIgnoredDirs := map[string]bool{
-		".crucible":         true,
+		".crucible":        true,
 		"node_modules":     true,
 		"vendor":           true,
 		"dist":             true,

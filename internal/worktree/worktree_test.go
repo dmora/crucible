@@ -1,6 +1,7 @@
 package worktree
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,7 +22,7 @@ func initTestRepo(t *testing.T) string {
 	}
 	for _, args := range cmds {
 		// #nosec G204 -- test helper
-		cmd := exec.Command(args[0], args[1:]...)
+		cmd := exec.CommandContext(context.Background(), args[0], args[1:]...)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git setup %v: %s: %v", args, out, err)
 		}
@@ -128,7 +129,7 @@ func TestProvisionPreExistingBranch(t *testing.T) {
 
 	// Create the branch manually.
 	// #nosec G204 -- test code
-	if out, err := exec.Command("git", "-C", repo, "branch", branch).CombinedOutput(); err != nil {
+	if out, err := exec.CommandContext(context.Background(), "git", "-C", repo, "branch", branch).CombinedOutput(); err != nil {
 		t.Fatalf("creating branch: %s: %v", out, err)
 	}
 
@@ -252,11 +253,11 @@ func TestPruneOrphanBranches(t *testing.T) {
 	// Manually remove the orphan's worktree directory (simulating a crash).
 	orphanPath := filepath.Join(m.baseDir, orphanID[:8])
 	// #nosec G204 -- test code
-	exec.Command("git", "-C", repo, "worktree", "remove", "--force", orphanPath).Run()
+	exec.CommandContext(context.Background(), "git", "-C", repo, "worktree", "remove", "--force", orphanPath).Run()
 
 	// Branch should still exist.
 	orphanBranch := "crucible/session-" + orphanID[:8]
-	if err := exec.Command("git", "-C", repo, "rev-parse", "--verify", orphanBranch).Run(); err != nil {
+	if err := exec.CommandContext(context.Background(), "git", "-C", repo, "rev-parse", "--verify", orphanBranch).Run(); err != nil {
 		t.Fatal("orphan branch should exist before prune")
 	}
 
@@ -266,13 +267,13 @@ func TestPruneOrphanBranches(t *testing.T) {
 	}
 
 	// Orphan branch should be gone.
-	if err := exec.Command("git", "-C", repo, "rev-parse", "--verify", orphanBranch).Run(); err == nil {
+	if err := exec.CommandContext(context.Background(), "git", "-C", repo, "rev-parse", "--verify", orphanBranch).Run(); err == nil {
 		t.Error("orphan branch was not pruned")
 	}
 
 	// Active branch should survive.
 	activeBranch := "crucible/session-" + activeID[:8]
-	if err := exec.Command("git", "-C", repo, "rev-parse", "--verify", activeBranch).Run(); err != nil {
+	if err := exec.CommandContext(context.Background(), "git", "-C", repo, "rev-parse", "--verify", activeBranch).Run(); err != nil {
 		t.Error("active branch was incorrectly pruned")
 	}
 }

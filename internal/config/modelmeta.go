@@ -136,12 +136,12 @@ func wellKnownADCPath() string {
 func detectMetadataIdentity() string {
 	client := &http.Client{Timeout: 500 * time.Millisecond}
 	const metadataURL = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email"
-	req, err := http.NewRequest(http.MethodGet, metadataURL, nil) //nolint:gosec // hardcoded GCE metadata URL, not user input
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, metadataURL, nil)
 	if err != nil {
 		return ""
 	}
 	req.Header.Set("Metadata-Flavor", "Google")
-	resp, err := client.Do(req) //nolint:gosec,bodyclose // hardcoded GCE metadata URL; closed below
+	resp, err := client.Do(req)
 	if err != nil {
 		return ""
 	}
