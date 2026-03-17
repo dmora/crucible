@@ -422,7 +422,9 @@ func (a *sessionAgent) publishUserMessage(call SessionAgentCall) {
 // buildToolSet constructs the supervisor's tool set for this turn.
 func (a *sessionAgent) buildToolSet(sessionID string, largeModel Model, turnAbort *atomic.Bool) ([]tool.Tool, error) {
 	var tools []tool.Tool
-	if !largeModel.Metadata.DisableSearch {
+	// Google Search (built-in tool) cannot be combined with function calling
+	// on the Gemini Developer API (Gemini 3+). Only enable on Vertex AI.
+	if !largeModel.Metadata.DisableSearch && largeModel.Auth.Backend == config.GeminiBackendVertex {
 		tools = append(tools, geminitool.GoogleSearch{})
 	}
 	if a.artifactService != nil {
