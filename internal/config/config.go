@@ -898,8 +898,10 @@ var DefaultStations = map[string]StationConfig{
 	},
 }
 
-// SetupDefaultStations merges default stations with any user-configured stations.
-// User config takes precedence — if a user defines "draft", it fully replaces the default.
+// SetupDefaultStations is a safety net that ensures the stations map exists and
+// adds any default stations that are completely absent. Field-level merging of
+// user overrides with defaults is handled upstream by stationDefaultsJSON() +
+// jsons.Merge in loadFromConfigPaths().
 func (c *Config) SetupDefaultStations() {
 	if c.Stations == nil {
 		c.Stations = make(map[string]StationConfig, len(DefaultStations))
