@@ -96,6 +96,13 @@ type Model struct {
 	Auth     config.AuthInfo      // resolved auth state (backend, method, user)
 }
 
+// IsGoogleSearchEnabled checks if the Google Search tool should be enabled for this model.
+// It is disabled on the Gemini Developer API when custom functions are used,
+// so we only enable it for the Vertex AI backend.
+func (m *Model) IsGoogleSearchEnabled() bool {
+	return !m.Metadata.DisableSearch && m.Auth.Backend == config.GeminiBackendVertex
+}
+
 // TaskHandle pairs a unique identity with a cancel function so that
 // concurrent cleanup can verify ownership before deleting map entries.
 type TaskHandle struct {
@@ -422,9 +429,7 @@ func (a *sessionAgent) publishUserMessage(call SessionAgentCall) {
 // buildToolSet constructs the supervisor's tool set for this turn.
 func (a *sessionAgent) buildToolSet(sessionID string, largeModel Model, turnAbort *atomic.Bool) ([]tool.Tool, error) {
 	var tools []tool.Tool
-	// Google Search (built-in tool) cannot be combined with function calling
-	// on the Gemini Developer API (Gemini 3+). Only enable on Vertex AI.
-	if !largeModel.Metadata.DisableSearch && largeModel.Auth.Backend == config.GeminiBackendVertex {
+	if largeModel.IsGoogleSearchEnabled() {
 		tools = append(tools, geminitool.GoogleSearch{})
 	}
 	if a.artifactService != nil {
