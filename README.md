@@ -32,6 +32,16 @@ The supervisor is role-sealed: it delegates work to stations but does not write 
 
 ## INSTALLATION
 
+### Homebrew
+
+```bash
+brew install dmora/tap/crucible
+```
+
+### Download binary
+
+Precompiled binaries for Linux, macOS, and FreeBSD (amd64/arm64) are available on the [releases page](https://github.com/dmora/crucible/releases).
+
 ### From source
 
 ```bash
@@ -48,7 +58,6 @@ go build -o bin/crucible .
 
 **Prerequisites:**
 
-- Go 1.26+
 - Google Cloud credentials (Vertex AI with ADC) or `GEMINI_API_KEY`
 - A station backend CLI installed and authenticated (default config uses Claude Code)
 
