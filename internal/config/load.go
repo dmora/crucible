@@ -559,8 +559,25 @@ func lookupConfigs(cwd string) []string {
 	return append(configPaths, foundConfigs...)
 }
 
+// stationDefaultsJSON marshals DefaultStations into a JSON byte slice
+// suitable for use as the lowest-priority layer in the config merge chain.
+func stationDefaultsJSON() []byte {
+	type wrapper struct {
+		Stations map[string]StationConfig `json:"stations"`
+	}
+	data, err := json.Marshal(wrapper{Stations: DefaultStations})
+	if err != nil {
+		slog.Error("Failed to marshal default stations", "err", err)
+		return []byte("{}")
+	}
+	return data
+}
+
 func loadFromConfigPaths(configPaths []string) (*Config, error) {
-	var configs [][]byte
+	// Prepend station defaults as the lowest-priority layer.
+	// The jsons.Merge deep merge ensures user fields override defaults
+	// while unset fields inherit from defaults (field-level merge).
+	configs := [][]byte{stationDefaultsJSON()}
 
 	for _, path := range configPaths {
 		data, err := os.ReadFile(path)
