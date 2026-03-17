@@ -678,7 +678,7 @@ func isAppleTerminal() bool { return os.Getenv("TERM_PROGRAM") == "Apple_Termina
 // Priority: explicit config > API key presence > GOOGLE_CLOUD_PROJECT env var.
 // Returns the resolved backend, project, and location.
 func resolveBackend(cfgBackend GeminiBackend, cfgProject, cfgLocation, resolvedAPIKey string, e env.Env, skipEnvDetect ...bool) (GeminiBackend, string, string) {
-	const defaultLocation = "us-central1"
+	const defaultLocation = "global"
 
 	// Explicit config wins
 	if cfgBackend != "" {
