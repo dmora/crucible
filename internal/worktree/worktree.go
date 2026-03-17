@@ -6,6 +6,7 @@ package worktree
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -44,7 +45,7 @@ func NewManager(workingDir string) (*Manager, error) {
 	}
 
 	// #nosec G204 -- args are constant strings, workingDir is from trusted config
-	out, err := exec.Command("git", "-C", workingDir, "rev-parse", "--show-toplevel").Output()
+	out, err := exec.CommandContext(context.Background(), "git", "-C", workingDir, "rev-parse", "--show-toplevel").Output()
 	if err != nil {
 		return nil, fmt.Errorf("not a git repository (or git not installed): %w", err)
 	}
@@ -127,7 +128,7 @@ func (m *Manager) Prune(activeSessionIDs []string) error {
 
 	// Final git-level prune for anything we missed.
 	// #nosec G204 -- all args are constant strings
-	if out, err := exec.Command("git", "-C", m.repoRoot, "worktree", "prune").CombinedOutput(); err != nil {
+	if out, err := exec.CommandContext(context.Background(), "git", "-C", m.repoRoot, "worktree", "prune").CombinedOutput(); err != nil {
 		errs = append(errs, fmt.Errorf("git worktree prune: %s: %w", strings.TrimSpace(string(out)), err))
 	}
 
@@ -174,7 +175,7 @@ func (m *Manager) infoFor(shortID, wtPath, branch string) *Info {
 // gitWorktreeAdd creates a git worktree, reusing the branch if it already exists.
 func (m *Manager) gitWorktreeAdd(wtPath, branch string) error {
 	// #nosec G204 -- branch/wtPath derived from session UUID + constant prefix
-	branchExists := exec.Command("git", "-C", m.repoRoot, "rev-parse", "--verify", branch).Run() == nil
+	branchExists := exec.CommandContext(context.Background(), "git", "-C", m.repoRoot, "rev-parse", "--verify", branch).Run() == nil
 
 	var args []string
 	if branchExists {
@@ -184,7 +185,7 @@ func (m *Manager) gitWorktreeAdd(wtPath, branch string) error {
 	}
 
 	// #nosec G204 -- args built from trusted constants and config-derived paths
-	out, err := exec.Command("git", args...).CombinedOutput()
+	out, err := exec.CommandContext(context.Background(), "git", args...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git worktree add: %s: %w", strings.TrimSpace(string(out)), err)
 	}
@@ -194,7 +195,7 @@ func (m *Manager) gitWorktreeAdd(wtPath, branch string) error {
 // removeWorktree removes a git worktree, logging on failure.
 func (m *Manager) removeWorktree(wtPath string) {
 	// #nosec G204 -- wtPath derived from baseDir + session short ID
-	out, err := exec.Command("git", "-C", m.repoRoot, "worktree", "remove", "--force", wtPath).CombinedOutput()
+	out, err := exec.CommandContext(context.Background(), "git", "-C", m.repoRoot, "worktree", "remove", "--force", wtPath).CombinedOutput()
 	if err != nil {
 		if _, statErr := os.Stat(wtPath); !os.IsNotExist(statErr) {
 			slog.Warn("Failed to remove worktree", "path", wtPath, "output", strings.TrimSpace(string(out)))
@@ -205,7 +206,7 @@ func (m *Manager) removeWorktree(wtPath string) {
 // deleteBranch deletes a git branch, logging on failure.
 func (m *Manager) deleteBranch(branch string) {
 	// #nosec G204 -- branch is branchPfx + short ID (trusted)
-	out, err := exec.Command("git", "-C", m.repoRoot, "branch", "-D", branch).CombinedOutput()
+	out, err := exec.CommandContext(context.Background(), "git", "-C", m.repoRoot, "branch", "-D", branch).CombinedOutput()
 	if err != nil {
 		slog.Debug("Branch delete skipped", "branch", branch, "output", strings.TrimSpace(string(out)))
 	}
@@ -232,7 +233,7 @@ func (m *Manager) pruneOrphans(entries []os.DirEntry, activeSet map[string]bool)
 		branch := branchPfx + shortID
 
 		// #nosec G204 -- wtPath/branch derived from trusted baseDir + directory listing
-		if out, err := exec.Command("git", "-C", m.repoRoot, "worktree", "remove", "--force", wtPath).CombinedOutput(); err != nil {
+		if out, err := exec.CommandContext(context.Background(), "git", "-C", m.repoRoot, "worktree", "remove", "--force", wtPath).CombinedOutput(); err != nil {
 			errs = append(errs, fmt.Errorf("prune worktree %s: %s: %w", shortID, strings.TrimSpace(string(out)), err))
 			continue
 		}
@@ -247,7 +248,7 @@ func (m *Manager) pruneOrphans(entries []os.DirEntry, activeSet map[string]bool)
 // after a worktree directory was removed (crash, manual deletion).
 func (m *Manager) pruneOrphanBranches(activeSet map[string]bool) []error {
 	// #nosec G204 -- all args are constant strings
-	out, err := exec.Command("git", "-C", m.repoRoot,
+	out, err := exec.CommandContext(context.Background(), "git", "-C", m.repoRoot,
 		"branch", "--list", branchPfx+"*", "--format=%(refname:short)",
 	).Output()
 	if err != nil {
