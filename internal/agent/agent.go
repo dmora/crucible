@@ -9,6 +9,7 @@
 package agent
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -22,6 +23,7 @@ import (
 	"google.golang.org/adk/artifact"
 	adkmodel "google.golang.org/adk/model"
 	"google.golang.org/adk/plugin"
+	"google.golang.org/adk/plugin/retryandreflect"
 	"google.golang.org/adk/runner"
 	adksession "google.golang.org/adk/session"
 	"google.golang.org/adk/tool"
@@ -30,6 +32,7 @@ import (
 	"google.golang.org/genai"
 
 	"github.com/dmora/adk-go-extras/plugin/notify"
+	"github.com/dmora/crucible/internal/agent/prompt"
 	"github.com/dmora/crucible/internal/agent/tools/mcp"
 	"github.com/dmora/crucible/internal/askuser"
 	"github.com/dmora/crucible/internal/config"
@@ -38,6 +41,7 @@ import (
 	"github.com/dmora/crucible/internal/permission"
 	"github.com/dmora/crucible/internal/pubsub"
 	"github.com/dmora/crucible/internal/session"
+	"github.com/dmora/crucible/internal/version"
 	"github.com/google/uuid"
 )
 
@@ -86,6 +90,23 @@ type SessionAgent interface {
 	StopAllProcesses(ctx context.Context)
 	SetSessionWorktree(sessionID, cwd, branch string)
 	PurgeSession(sessionID string)
+
+	// ReloadStations reconciles station processManagers with updated config.
+	ReloadStations(cfg *config.Config, stations map[string]config.StationConfig)
+
+	// SkipArtifactCheck sets a session-level flag that bypasses artifact enforcement
+	// for all remaining dispatches in this session.
+	SkipArtifactCheck(ctx context.Context, sessionID string) error
+
+	// Relay mode: direct operator-to-station communication.
+	StartRelay(ctx context.Context, sessionID, station string) error
+	SendRelay(ctx context.Context, sessionID, message string) error
+	StopRelay(ctx context.Context, sessionID string) error
+	SwitchRelay(ctx context.Context, sessionID, newStation string) error
+	CancelRelayTurn(sessionID string)
+	RelayTarget(sessionID string) *string
+	IsRelayActive(sessionID string) bool
+	IsRelayTurnBusy(sessionID string) bool
 }
 
 // Model holds an ADK model and its metadata.
@@ -146,6 +167,8 @@ type sessionAgent struct {
 	stations map[string]*processManager
 	// steeringConfig maps station name → steering text for ephemeral reminders.
 	steeringConfig map[string]string
+	// pipelineBreakers tracks per-session circuit breakers for consecutive failures.
+	pipelineBreakers *csync.Map[string, *PipelineBreaker]
 
 	// lastTodoUpdate tracks per-session when todos were last updated.
 	// Used by staleTodosReminder to inject a steering reminder when stale.
@@ -153,6 +176,9 @@ type sessionAgent struct {
 
 	// worktreeInfos stores per-session worktree info for CWD injection.
 	worktreeInfos *csync.Map[string, *worktreeInfo]
+
+	// relay manages direct operator-to-station relay sessions.
+	relay *RelayController
 }
 
 // worktreeInfo holds session-specific worktree data for per-turn injection.
@@ -195,7 +221,9 @@ func NewSessionAgent(opts SessionAgentOptions) SessionAgent {
 		}
 	}
 
-	return &sessionAgent{
+	activeRequests := csync.NewMap[string, *TaskHandle]()
+
+	a := &sessionAgent{
 		agentDef:           opts.AgentDef,
 		largeModel:         csync.NewValue(opts.LargeModel),
 		smallModel:         csync.NewValue(opts.SmallModel),
@@ -215,14 +243,26 @@ func NewSessionAgent(opts SessionAgentOptions) SessionAgent {
 			notify.WithInstruction("[system] messages are runtime notifications from the Crucible control system."),
 		),
 		messageQueue:      csync.NewMap[string, []SessionAgentCall](),
-		activeRequests:    csync.NewMap[string, *TaskHandle](),
+		activeRequests:    activeRequests,
 		turnMetrics:       csync.NewMap[string, *TurnMetrics](),
 		activeADKSessions: csync.NewMap[string, adksession.Session](),
 		stations:          stations,
 		steeringConfig:    steeringCfg,
+		pipelineBreakers:  csync.NewMap[string, *PipelineBreaker](),
 		lastTodoUpdate:    csync.NewMap[string, time.Time](),
 		worktreeInfos:     csync.NewMap[string, *worktreeInfo](),
 	}
+
+	a.relay = &RelayController{
+		sessions:        csync.NewMap[string, *relaySession](),
+		stations:        stations,
+		messageBroker:   opts.MessageBroker,
+		activeRequests:  activeRequests,
+		adkSessionSvc:   opts.ADKSessionService,
+		ensureADKSessFn: a.ensureADKSession,
+	}
+
+	return a
 }
 
 // SetSessionWorktree configures worktree isolation for a session.
@@ -244,6 +284,7 @@ func (a *sessionAgent) PurgeSession(sessionID string) {
 		pm.PurgeSessionCWD(sessionID)
 	}
 	a.worktreeInfos.Del(sessionID)
+	a.pipelineBreakers.Del(sessionID)
 }
 
 func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*AgentResult, error) {
@@ -287,6 +328,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*AgentRe
 	}
 	a.activeADKSessions.Set(call.SessionID, adkSess)
 	defer a.activeADKSessions.Del(call.SessionID)
+	a.backfillPromptHash(ctx, adkSess, call.SessionID)
 
 	if call.PublishedMsgID == "" {
 		a.publishUserMessage(call)
@@ -295,8 +337,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (*AgentRe
 	a.turnMetrics.Set(call.SessionID, metrics)
 
 	turnAbort := new(atomic.Bool)
-	cleanupMCP := a.registerMCPAbort(call.SessionID, turnAbort)
-	defer cleanupMCP()
+	defer a.registerMCPAbort(call.SessionID, turnAbort)()
 
 	tools, err := a.buildToolSet(call.SessionID, largeModel, turnAbort)
 	if err != nil {
@@ -454,6 +495,16 @@ func (a *sessionAgent) buildToolSet(sessionID string, largeModel Model, turnAbor
 		return nil, fmt.Errorf("failed to create thought tool: %w", err)
 	}
 	tools = append(tools, thoughtTool)
+	epistemicTool, err := newEpistemicCheckTool()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create epistemic_check tool: %w", err)
+	}
+	tools = append(tools, epistemicTool)
+	reflectTool, err := newSelfReflectTool()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create self_reflect tool: %w", err)
+	}
+	tools = append(tools, reflectTool)
 	todosTool, err := newTodosTool(a.sessions, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create todos tool: %w", err)
@@ -492,19 +543,43 @@ func (a *sessionAgent) buildAgentAndRunner(
 		return nil, fmt.Errorf("failed to create LLM agent: %w", err)
 	}
 
-	// Plugin order: midloop → notify → steering → stall_recovery → retry → logging.
+	// Plugin order: midloop → notify → steering → circuit_breaker → retryandreflect → retryObserver → stall_recovery → retry → logging.
+	const toolMaxRetries = 3
+
 	midloop := newMidLoopPlugin(a.messageQueue, a.activeADKSessions, a.adkSessionService)
 	stallRecovery := newStallRecoveryPlugin()
 	retryPlug := newRetryPlugin(largeModel.LLM, DefaultRetryTransportConfig())
-	plugins := []*plugin.Plugin{midloop, a.notifier.Plugin(), stallRecovery, retryPlug, newLoggingPlugin()}
+	rrPlug := retryandreflect.MustNew(retryandreflect.WithMaxRetries(toolMaxRetries))
+	rrObserver := newRetryObserverPlugin(a.notifier, toolMaxRetries)
+	logging := newLoggingPlugin()
+
+	// Per-session pipeline circuit breaker.
+	breaker := a.pipelineBreakers.GetOrSet(call.SessionID, func() *PipelineBreaker {
+		return NewPipelineBreaker(defaultPipelineBreakerThreshold)
+	})
+	stationNames := make([]string, 0, len(a.stations))
+	for name := range a.stations {
+		stationNames = append(stationNames, name)
+	}
+	cbPlug, err := newCircuitBreakerPlugin(stationNames, breaker)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create circuit breaker plugin: %w", err)
+	}
+
+	sanitize := newSanitizePlugin()
+
+	var plugins []*plugin.Plugin
 	if len(a.steeringConfig) > 0 {
 		plugins = []*plugin.Plugin{
-			midloop,
-			a.notifier.Plugin(),
-			newSteeringPlugin(a.steeringConfig),
-			stallRecovery,
-			retryPlug,
-			newLoggingPlugin(),
+			sanitize, midloop, a.notifier.Plugin(), newSteeringPlugin(a.steeringConfig),
+			cbPlug, rrPlug, rrObserver,
+			stallRecovery, retryPlug, logging,
+		}
+	} else {
+		plugins = []*plugin.Plugin{
+			sanitize, midloop, a.notifier.Plugin(),
+			cbPlug, rrPlug, rrObserver,
+			stallRecovery, retryPlug, logging,
 		}
 	}
 
@@ -629,11 +704,48 @@ func (a *sessionAgent) ensureADKSession(ctx context.Context, sessionID string) (
 		AppName:   adkAppName,
 		UserID:    adkUserID,
 		SessionID: sessionID,
+		State: map[string]any{
+			"build_version":                 version.Version,
+			"prompt_hash":                   a.computePromptHash(),
+			"app:artifact_registry_version": "1",
+		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create ADK session: %w", err)
 	}
 	return createResp.Session, nil
+}
+
+// computePromptHash returns the prompt hash only if the main prompt body is
+// non-empty. Returns "" when the prompt hasn't been initialized yet (e.g.,
+// shell/relay calling ensureADKSession before the prompt is ready).
+func (a *sessionAgent) computePromptHash() string {
+	body := a.systemPrompt.Get()
+	if body == "" {
+		return ""
+	}
+	basePrompt := body
+	if prefix := a.systemPromptPrefix.Get(); prefix != "" {
+		basePrompt = prefix + "\n\n" + basePrompt
+	}
+	return prompt.Hash(basePrompt)
+}
+
+// backfillPromptHash persists prompt_hash via AppendEvent if it was empty at
+// session creation time (shell/relay early creation or pre-feature sessions).
+func (a *sessionAgent) backfillPromptHash(ctx context.Context, sess adksession.Session, sessionID string) {
+	if v, err := sess.State().Get("prompt_hash"); err == nil && v != "" {
+		return
+	}
+	hash := a.computePromptHash()
+	if hash == "" {
+		return
+	}
+	evt := adksession.NewEvent("")
+	evt.Actions.StateDelta = map[string]any{"prompt_hash": hash}
+	if err := a.adkSessionService.AppendEvent(ctx, sess, evt); err != nil {
+		slog.Warn("Failed to backfill prompt_hash", "err", err, "session_id", sessionID)
+	}
 }
 
 // isSessionNotFoundError checks whether an error from ADK's session.Service.Get
@@ -646,6 +758,17 @@ func isSessionNotFoundError(err error) bool {
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "not found") || strings.Contains(msg, "record not found")
+}
+
+// SkipArtifactCheck sets a session-level flag that bypasses artifact enforcement
+// for all remaining dispatches in this session. Uses ensureADKSession for
+// get-or-create semantics — works even if no conversation has started yet.
+func (a *sessionAgent) SkipArtifactCheck(ctx context.Context, sessionID string) error {
+	sess, err := a.ensureADKSession(ctx, sessionID)
+	if err != nil {
+		return fmt.Errorf("skip artifact check: %w", err)
+	}
+	return sess.State().Set("app:skip_artifact_check", "true")
 }
 
 // Summarize is a no-op. Summarization is deferred to ADK's own compaction.
@@ -790,4 +913,91 @@ func (a *sessionAgent) StopAllProcesses(ctx context.Context) {
 	for _, pm := range a.stations {
 		pm.stopAll(ctx)
 	}
+}
+
+// ReloadStations reconciles station processManagers with updated config.
+// Soft updates (description, gate) mutate in place; hard updates (backend,
+// model, skill, options, env) replace the processManager.
+func (a *sessionAgent) ReloadStations(cfg *config.Config, stations map[string]config.StationConfig) {
+	newStations := make(map[string]*processManager, len(stations))
+	newSteering := make(map[string]string, len(stations))
+
+	for name, scfg := range stations {
+		if scfg.Disabled {
+			continue
+		}
+		existing, exists := a.stations[name]
+		if exists && !needsHardReload(existing, scfg) {
+			existing.description = scfg.Description
+			existing.gate.gated = scfg.Gate
+			newStations[name] = existing
+		} else {
+			if exists {
+				existing.stopAll(context.Background())
+			}
+			ctxWindow := contextWindowForStation(cfg, scfg)
+			pm := newStationProcessManager(name, a.workingDir, scfg, ctxWindow)
+			for sessionID, wt := range a.worktreeInfos.Seq2() {
+				pm.SetSessionCWD(sessionID, wt.ResolvedCWD)
+			}
+			newStations[name] = pm
+		}
+		if scfg.Steering != "" {
+			newSteering[name] = scfg.Steering
+		}
+	}
+
+	// Stop processManagers for removed stations.
+	for name, pm := range a.stations {
+		if _, kept := newStations[name]; !kept {
+			pm.stopAll(context.Background())
+		}
+	}
+
+	// Atomic swap.
+	a.stations = newStations
+	a.steeringConfig = newSteering
+	a.relay.stations = newStations
+}
+
+// needsHardReload returns true if the processManager must be replaced.
+func needsHardReload(pm *processManager, cfg config.StationConfig) bool {
+	backend := cmp.Or(cfg.Backend, "claude")
+	return pm.backend != backend ||
+		pm.model != cfg.Model ||
+		pm.task.skill != cfg.Skill
+}
+
+// --- Relay delegation ---
+
+func (a *sessionAgent) StartRelay(ctx context.Context, sessionID, station string) error {
+	return a.relay.StartRelay(ctx, sessionID, station)
+}
+
+func (a *sessionAgent) SendRelay(ctx context.Context, sessionID, msg string) error {
+	return a.relay.SendRelay(ctx, sessionID, msg)
+}
+
+func (a *sessionAgent) StopRelay(ctx context.Context, sessionID string) error {
+	return a.relay.StopRelay(ctx, sessionID)
+}
+
+func (a *sessionAgent) SwitchRelay(ctx context.Context, sessionID, newStation string) error {
+	return a.relay.SwitchRelay(ctx, sessionID, newStation)
+}
+
+func (a *sessionAgent) CancelRelayTurn(sessionID string) {
+	a.relay.CancelRelayTurn(sessionID)
+}
+
+func (a *sessionAgent) RelayTarget(sessionID string) *string {
+	return a.relay.RelayTarget(sessionID)
+}
+
+func (a *sessionAgent) IsRelayActive(sessionID string) bool {
+	return a.relay.IsRelayActive(sessionID)
+}
+
+func (a *sessionAgent) IsRelayTurnBusy(sessionID string) bool {
+	return a.relay.IsRelayTurnBusy(sessionID)
 }

@@ -23,6 +23,7 @@ import (
 	"github.com/dmora/crucible/internal/app"
 	"github.com/dmora/crucible/internal/config"
 	"github.com/dmora/crucible/internal/db"
+	"github.com/dmora/crucible/internal/db/global"
 	"github.com/dmora/crucible/internal/event"
 	"github.com/dmora/crucible/internal/projects"
 	"github.com/dmora/crucible/internal/ui/common"
@@ -47,6 +48,7 @@ func init() {
 		schemaCmd,
 		statsCmd,
 		updateProvidersCmd,
+		sessionsCmd,
 	)
 }
 
@@ -222,10 +224,24 @@ func setupApp(cmd *cobra.Command) (*app.App, error) {
 		return nil, err
 	}
 
-	appInstance, err := app.New(ctx, conn, cfg)
+	// Open global session index (best-effort).
+	globalDB, isNewGlobalDB, globalErr := global.Connect(ctx)
+	if globalErr != nil {
+		slog.Warn("Failed to open global session index", "error", globalErr)
+		// globalDB is nil — app continues without global index
+	}
+
+	appInstance, err := app.New(ctx, conn, globalDB, cfg)
 	if err != nil {
 		slog.Error("Failed to create app instance", "error", err)
 		return nil, err
+	}
+
+	// First-run reconciliation when the global index was just created.
+	if globalDB != nil && isNewGlobalDB {
+		if err := global.Reconcile(ctx, globalDB); err != nil {
+			slog.Warn("Global index reconciliation failed", "error", err)
+		}
 	}
 
 	if shouldEnableMetrics(cfg) {

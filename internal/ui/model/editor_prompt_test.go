@@ -3,26 +3,30 @@ package model
 import "testing"
 
 func TestResolveEditorMode(t *testing.T) {
+	station := "build"
 	tests := []struct {
 		name        string
 		hold, yolo  bool
 		shellPrefix bool
+		relayTarget *string
 		want        editorMode
 	}{
-		{"normal", false, false, false, editorModeNormal},
-		{"yolo only", false, true, false, editorModeYolo},
-		{"hold only", true, false, false, editorModeHold},
-		{"hold beats yolo", true, true, false, editorModeHold},
-		{"shell only", false, false, true, editorModeShell},
-		{"shell beats hold", true, false, true, editorModeShell},
-		{"shell beats yolo", false, true, true, editorModeShell},
+		{"normal", false, false, false, nil, editorModeNormal},
+		{"yolo only", false, true, false, nil, editorModeYolo},
+		{"hold only", true, false, false, nil, editorModeHold},
+		{"hold beats yolo", true, true, false, nil, editorModeHold},
+		{"shell only", false, false, true, nil, editorModeShell},
+		{"shell beats hold", true, false, true, nil, editorModeShell},
+		{"shell beats yolo", false, true, true, nil, editorModeShell},
+		{"relay beats shell", false, false, true, &station, editorModeRelay},
+		{"relay beats hold", true, false, false, &station, editorModeRelay},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := resolveEditorMode(tt.hold, tt.yolo, tt.shellPrefix)
+			got := resolveEditorMode(tt.hold, tt.yolo, tt.shellPrefix, tt.relayTarget)
 			if got != tt.want {
-				t.Errorf("resolveEditorMode(%v, %v, %v) = %v, want %v",
-					tt.hold, tt.yolo, tt.shellPrefix, got, tt.want)
+				t.Errorf("resolveEditorMode(%v, %v, %v, %v) = %v, want %v",
+					tt.hold, tt.yolo, tt.shellPrefix, tt.relayTarget, got, tt.want)
 			}
 		})
 	}
@@ -39,6 +43,7 @@ func TestResolveEditorPlaceholder(t *testing.T) {
 		{"yolo", editorModeYolo, "Yolo mode!"},
 		{"hold", editorModeHold, "Hold active"},
 		{"shell", editorModeShell, "Shell command"},
+		{"relay", editorModeRelay, "Relay mode — messages go directly to the station"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

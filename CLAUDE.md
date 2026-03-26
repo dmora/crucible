@@ -38,7 +38,7 @@ internal/
 | Station | Mode | Skill | Purpose |
 |---------|------|-------|---------|
 | `design` | — | `claude-foundry:design` | Architecture analysis |
-| `draft` | plan | — | Technical spec, read-only |
+| `plan` | plan | — | Technical spec, read-only |
 | `build` | act | `feature-dev:feature-dev` | Implementation |
 | `inspect` | plan | `claude-code-quality:review-plan` | Plan validation |
 | `review` | plan | `claude-code-quality:rigorous-pr-review` | Code review |
@@ -64,7 +64,8 @@ Separate DBs because ADK hardcodes `TableName() = "sessions"`.
 
 ## Project Management
 
-[GitHub Project #5](https://github.com/users/dmora/projects/5) — 2-week iterations, Priority P0/P1/P2, Size XS–XL.
+- **Issues:** [crucible-pro issues](https://github.com/dmora/crucible-pro/issues) (private)
+- **Project board:** [GitHub Project #5](https://github.com/users/dmora/projects/5) — 2-week iterations, Priority P0/P1/P2, Size XS–XL.
 
 ## Context Rules
 

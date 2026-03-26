@@ -237,7 +237,11 @@ func NewToolMessageItem(
 	case tools.ThoughtToolName:
 		item = NewThoughtToolMessageItem(sty, toolCall, result, canceled)
 	default:
-		if IsStationTool(toolCall.Name) {
+		if strings.HasPrefix(toolCall.Name, "relay:") {
+			stationName := strings.TrimPrefix(toolCall.Name, "relay:")
+			displayName := strings.ToUpper(stationName[:1]) + stationName[1:]
+			item = NewRelayTurnMessageItem(sty, toolCall, result, canceled, displayName)
+		} else if IsStationTool(toolCall.Name) {
 			displayName := strings.ToUpper(toolCall.Name[:1]) + toolCall.Name[1:]
 			item = NewStationToolMessageItem(sty, toolCall, result, canceled, displayName)
 		} else if strings.HasPrefix(toolCall.Name, "mcp_") {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -51,6 +52,7 @@ type TurnRecord struct {
 	Elapsed          time.Duration
 	ContextUsed      int
 	ContextSize      int
+	pendingFileOp    *FileOp // set at tool start, confirmed or cleared at tool result
 }
 
 // ContextBuffer captures structured data from station messages for continuation prompts.
@@ -78,7 +80,9 @@ func (cb *ContextBuffer) StartTurn() {
 }
 
 // RecordToolStart appends a new BufferedToolCall to the current turn.
-// Also infers and records a FileOp for Read/Write/Edit/MultiEdit tools.
+// For Write/Edit tools, stores a pending FileOp that is confirmed on tool
+// success (see ConfirmPendingFileOp). This ensures only successful writes
+// are recorded.
 // TodoWrite inputs are captured as the latest task progress snapshot.
 func (cb *ContextBuffer) RecordToolStart(name, input string) {
 	if cb.current == nil {
@@ -94,21 +98,34 @@ func (cb *ContextBuffer) RecordToolStart(name, input string) {
 		cb.current.LastTodoSnapshot = json.RawMessage(input)
 	}
 
-	// Infer FileOp from tool name.
+	// Store pending FileOp — confirmed on tool success, cleared on failure.
+	// Parsed here because msg.Tool.Input is not available on MessageToolResult
+	// for all backends (e.g. ACP).
+	// Only overwrite pendingFileOp when the current tool IS a file op.
+	// Non-file tools (Read, Bash, etc.) must not clear a pending Write/Edit.
 	if op := inferFileOp(name); op != "" {
-		if path := extractPath(input); path != "" {
-			cb.RecordFileOp(path, op)
+		fields := parseJSONFields(input)
+		path := fields["file_path"]
+		if path == "" {
+			path = fields["path"]
 		}
+		if path != "" {
+			cb.current.pendingFileOp = &FileOp{Path: path, Op: op}
+			slog.Debug("FileOp pending", "tool", name, "op", op, "path", path)
+		}
+	} else {
+		slog.Debug("FileOp skip (not a file tool)", "tool", name)
 	}
 }
 
 // inferFileOp returns the file operation string for known file-modifying tools, or "".
 // Read/View are excluded — reads aren't modifications and add noise.
+// Covers both Claude CLI tool names and ACP/OpenCode variants.
 func inferFileOp(name string) string {
 	switch strings.ToLower(name) {
-	case "write":
+	case "write", "write_file":
 		return fileOpWrite
-	case "edit", "multiedit":
+	case "edit", "multiedit", "edit_file", "file_edit", "str_replace_editor":
 		return fileOpEdit
 	default:
 		return ""
@@ -123,6 +140,41 @@ func (cb *ContextBuffer) RecordToolOutput(output string) {
 	}
 	last := &cb.current.ToolCalls[len(cb.current.ToolCalls)-1]
 	last.OutputSummary = truncate(output, maxOutputSummaryLen)
+}
+
+// ConfirmPendingFileOp moves the pending FileOp (set at tool start) into the
+// confirmed Files list. Called when a tool result indicates success.
+// toolName is the name of the tool whose result just completed. The pending op
+// is only confirmed when the completing tool is itself a file-modifying tool,
+// preventing a Read result from incorrectly confirming a pending Write.
+// Pass "" for unconditional confirmation (hard-error fallback).
+func (cb *ContextBuffer) ConfirmPendingFileOp(toolName string) {
+	if cb.current == nil || cb.current.pendingFileOp == nil {
+		slog.Debug("FileOp confirm skip", "tool", toolName, "reason", "no pending op")
+		return
+	}
+	if toolName != "" && inferFileOp(toolName) == "" {
+		slog.Debug("FileOp confirm skip", "tool", toolName, "reason", "non-file tool result")
+		return // non-file tool result — leave pending op alone
+	}
+	slog.Debug("FileOp confirmed", "tool", toolName, "path", cb.current.pendingFileOp.Path, "op", cb.current.pendingFileOp.Op)
+	cb.RecordFileOp(cb.current.pendingFileOp.Path, cb.current.pendingFileOp.Op)
+	cb.current.pendingFileOp = nil
+}
+
+// ClearPendingFileOp discards the pending FileOp without recording it.
+// Called when a tool result indicates failure.
+// toolName is the name of the tool whose result just completed. The pending op
+// is only cleared when the completing tool is a file-modifying tool or when
+// toolName is "" (unconditional clear for hard errors like MessageError).
+func (cb *ContextBuffer) ClearPendingFileOp(toolName string) {
+	if cb.current == nil {
+		return
+	}
+	if toolName != "" && inferFileOp(toolName) == "" {
+		return // non-file tool result — leave pending op alone
+	}
+	cb.current.pendingFileOp = nil
 }
 
 // RecordFileOp appends a file operation to the current turn, deduplicated by path+op.
@@ -531,17 +583,18 @@ func truncate(s string, maxLen int) string {
 	return s[:maxLen-3] + "..."
 }
 
-// extractPath tries to extract a file_path or path from a JSON-like input string.
-// Simple heuristic: look for common patterns. Not a full JSON parser.
-func extractPath(input string) string {
-	for _, key := range []string{`"file_path":"`, `"file_path": "`, `"path":"`, `"path": "`} {
-		if idx := strings.Index(input, key); idx >= 0 {
-			start := idx + len(key)
-			end := strings.Index(input[start:], `"`)
-			if end > 0 {
-				return input[start : start+end]
+// LastWrittenMD returns the path of the last confirmed Write targeting a .md
+// file across all finalized turns. Returns "" if none found.
+func (cb *ContextBuffer) LastWrittenMD() string {
+	var last string
+	for _, t := range cb.turns {
+		for _, f := range t.Files {
+			slog.Debug("LastWrittenMD scan", "path", f.Path, "op", f.Op)
+			if f.Op == fileOpWrite && strings.HasSuffix(f.Path, ".md") {
+				last = f.Path
 			}
 		}
 	}
-	return ""
+	slog.Debug("LastWrittenMD result", "path", last, "turns", len(cb.turns))
+	return last
 }

@@ -1034,7 +1034,7 @@ func TestConfig_setDefaultsDisableDefaultProvidersEnvVar(t *testing.T) {
 func TestDefaultStations(t *testing.T) {
 	// All seven default stations must be present.
 	require.Contains(t, DefaultStations, "design")
-	require.Contains(t, DefaultStations, "draft")
+	require.Contains(t, DefaultStations, "plan")
 	require.Contains(t, DefaultStations, "inspect")
 	require.Contains(t, DefaultStations, "build")
 	require.Contains(t, DefaultStations, "review")
@@ -1045,17 +1045,18 @@ func TestDefaultStations(t *testing.T) {
 		build := DefaultStations["build"]
 		assert.Equal(t, "claude", build.Backend)
 		assert.NotEmpty(t, build.Description)
-		assert.Contains(t, build.Description, "read-write access")
+		assert.Contains(t, build.Description, "Implement")
 		assert.Equal(t, "feature-dev:feature-dev", build.Skill)
-		// No "mode" in Options — act mode (full write access).
 		assert.Empty(t, build.Options)
+		// build→build is allowed (no afterDone constraint).
+		assert.Empty(t, build.AfterDone)
 	})
 
 	t.Run("inspect", func(t *testing.T) {
 		inspect := DefaultStations["inspect"]
 		assert.Equal(t, "opencode-acp", inspect.Backend)
 		assert.NotEmpty(t, inspect.Description)
-		assert.Contains(t, inspect.Description, "read-only")
+		assert.Contains(t, inspect.Description, "Validate")
 		assert.Equal(t, "review-plan", inspect.Skill)
 		assert.Empty(t, inspect.Options)
 	})
@@ -1073,12 +1074,10 @@ func TestDefaultStations(t *testing.T) {
 		design := DefaultStations["design"]
 		assert.Equal(t, "claude", design.Backend)
 		assert.NotEmpty(t, design.Description)
-		assert.Contains(t, design.Description, "read-only")
+		assert.Contains(t, design.Description, "architecture")
 		assert.Equal(t, "claude-foundry:design", design.Skill)
 		assert.Equal(t, "design", design.ArtifactType)
-		assert.Contains(t, design.Steering, "draft")
-		// No plan mode — skill enforces read-only via prompt, not system boundary.
-		// This is intentional: plan mode triggers a lower-quality explorer model.
+		assert.Contains(t, design.Steering, "plan")
 		assert.Empty(t, design.Options)
 	})
 
@@ -1086,13 +1085,10 @@ func TestDefaultStations(t *testing.T) {
 		verify := DefaultStations["verify"]
 		assert.Equal(t, "claude", verify.Backend)
 		assert.NotEmpty(t, verify.Description)
-		assert.Contains(t, verify.Description, "read-write access")
-		assert.Contains(t, verify.Description, "runs tests")
+		assert.Contains(t, verify.Description, "Verify")
 		assert.Equal(t, "verification", verify.ArtifactType)
-		// No skill, no plan mode — act mode with full access.
-		assert.Empty(t, verify.Skill)
+		assert.Equal(t, "claude-foundry:verify", verify.Skill)
 		assert.Empty(t, verify.Options)
-		// Verify is NOT gated — runs automatically after build.
 		assert.False(t, verify.Gate)
 		assert.Contains(t, verify.Steering, "ship")
 	})
@@ -1101,13 +1097,10 @@ func TestDefaultStations(t *testing.T) {
 		ship := DefaultStations["ship"]
 		assert.Equal(t, "claude", ship.Backend)
 		assert.NotEmpty(t, ship.Description)
-		assert.Contains(t, ship.Description, "read-write access")
 		assert.Contains(t, ship.Description, "pull request")
 		assert.Equal(t, "pr", ship.ArtifactType)
-		// No skill, no plan mode — act mode with full access.
 		assert.Empty(t, ship.Skill)
 		assert.Empty(t, ship.Options)
-		// Ship IS gated — requires operator approval.
 		require.True(t, ship.Gate)
 		assert.Contains(t, ship.Steering, "PR URL")
 	})

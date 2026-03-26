@@ -18,6 +18,27 @@ import (
 	"github.com/dmora/crucible/internal/ui/util"
 )
 
+// AuthID is the identifier for the Auth dialog.
+const AuthID = "auth"
+
+// ActionCredentialReady is returned by auth sub-dialogs when the user has
+// provided a credential. ui.go calls SetProviderCredential + UpdateAgentModel.
+type ActionCredentialReady struct {
+	ProviderID string
+	Credential config.Credential
+	// SelectModel, when non-nil, causes ui.go to re-emit ActionSelectModel
+	// after persisting the credential. This resumes the model-selection flow
+	// that was interrupted by first-time auth or re-authentication.
+	SelectModel *ActionSelectModel
+}
+
+// ActionOpenSubDialog is returned when a dialog wants to push another dialog
+// onto the overlay stack. Carries the constructed dialog and its init command.
+type ActionOpenSubDialog struct {
+	Dialog Dialog
+	Cmd    tea.Cmd
+}
+
 // ActionClose is a message to close the current dialog.
 type ActionClose struct{}
 
@@ -89,10 +110,22 @@ type (
 		Arguments []commands.Argument
 		Args      map[string]string // Actual argument values
 	}
+	// ActionSkipPlan sets a session-level flag that bypasses artifact enforcement
+	// for all remaining dispatches in this session.
+	ActionSkipPlan struct{}
+	// ActionReloadStations signals that station configuration changed and
+	// processManagers should be reconciled.
+	ActionReloadStations struct {
+		Stations []string // names of changed stations (empty = full reload)
+	}
 	// ActionShowFactoryStatus is a message to show the factory status banner.
 	ActionShowFactoryStatus struct{}
 	// ActionShowEquipment is a message to open the equipment inspector dialog.
 	ActionShowEquipment struct{}
+	// ActionSelectRelay is a message indicating a relay station has been selected.
+	ActionSelectRelay struct {
+		Station string // empty = exit relay (back to supervisor)
+	}
 	// ActionRunMCPPrompt is a message to run a custom command.
 	ActionRunMCPPrompt struct {
 		Title       string
@@ -111,24 +144,21 @@ type (
 	}
 )
 
-// Messages for OAuth2 device flow dialog.
+// Messages for OAuth2 authorization code flow dialog.
 type (
-	// ActionInitiateOAuth is sent when the device auth is initiated
-	// successfully.
+	// ActionInitiateOAuth is sent when the auth flow is initiated and
+	// the browser should be opened.
 	ActionInitiateOAuth struct {
-		DeviceCode      string
-		UserCode        string
-		ExpiresIn       int
-		VerificationURL string
-		Interval        int
+		AuthURL string
+		Port    int
 	}
 
-	// ActionCompleteOAuth is sent when the device flow completes successfully.
+	// ActionCompleteOAuth is sent when the OAuth flow completes successfully.
 	ActionCompleteOAuth struct {
 		Token *oauth.Token
 	}
 
-	// ActionOAuthErrored is sent when the device flow encounters an error.
+	// ActionOAuthErrored is sent when the OAuth flow encounters an error.
 	ActionOAuthErrored struct {
 		Error error
 	}

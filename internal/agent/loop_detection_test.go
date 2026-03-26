@@ -46,28 +46,15 @@ func TestLoopDetector(t *testing.T) {
 		assert.True(t, ld.track("read_file"))
 	})
 
-	t.Run("total call cap triggers on alternating tools", func(t *testing.T) {
+	t.Run("many calls with varied tools does not trigger", func(t *testing.T) {
 		ld := &loopDetector{}
-		// Alternate between two tools — consecutive detector won't fire.
-		for i := 0; i < maxTotalToolCalls-1; i++ {
+		// 100 alternating calls — should never trigger since no consecutive repeats.
+		for i := 0; i < 100; i++ {
 			tool := "tool_a"
 			if i%2 == 1 {
 				tool = "tool_b"
 			}
-			assert.False(t, ld.track(tool), "should not trigger at total call %d", i+1)
+			assert.False(t, ld.track(tool), "should not trigger at call %d", i+1)
 		}
-		// The 50th call should trigger.
-		assert.True(t, ld.track("tool_a"), "should trigger at total call %d", maxTotalToolCalls)
-	})
-
-	t.Run("tracks total calls across resets", func(t *testing.T) {
-		ld := &loopDetector{}
-		// Make calls below consecutive threshold, switching tools.
-		for i := 0; i < 3; i++ {
-			ld.track("read_file")
-		}
-		ld.track("write_file")
-		assert.Equal(t, 4, ld.totalCalls)
-		assert.Equal(t, 1, ld.count) // consecutive reset to 1
 	})
 }

@@ -86,6 +86,7 @@ const (
 	OpStateFailed            OperatorState = "Failed"
 	OpStateCanceled          OperatorState = "Canceled"
 	OpStateWaitingPermission OperatorState = "Waiting for permission"
+	OpStateDirect            OperatorState = "Direct"
 )
 
 // ProcessEventType classifies process events.
@@ -95,20 +96,28 @@ const (
 	ProcessEventStateChanged   ProcessEventType = iota
 	ProcessEventActivityUpdate                  // sub-agent tool activity changed
 	ProcessEventDispatchUpdate                  // dispatch log changed
+	ProcessEventRetry                           // supervisor tool retry in progress
+	ProcessEventRetryExhausted                  // supervisor tool retries exhausted
 )
 
 // ProcessEvent is published when a process state changes.
 type ProcessEvent struct {
 	Type      ProcessEventType
 	SessionID string
-	Station   string // station name (e.g. "draft", "inspect")
+	Station   string // station name (e.g. "plan", "inspect")
 	State     ProcessState
+
+	// Retry metadata (only for ProcessEventRetry / ProcessEventRetryExhausted).
+	RetryTool    string // tool name that failed
+	RetryAttempt int    // current attempt (1-based)
+	RetryMax     int    // max retry attempts (from observer config)
+	RetryError   string // truncated error excerpt (from error_details)
 }
 
 // ProcessInfo holds information about an agentrun process for UI display.
 type ProcessInfo struct {
 	SessionID string
-	Station   string // station name (e.g. "draft", "inspect", "fabricate")
+	Station   string // station name (e.g. "plan", "inspect", "fabricate")
 	Backend   string // "claude", "codex", "opencode"
 	Model     string // resolved model name from CLI init
 	State     ProcessState
@@ -133,6 +142,9 @@ type ProcessInfo struct {
 
 	// Phase is the sub-agent's current phase (for spinner text).
 	Phase ProcessPhase
+
+	// IsRelayDriven is true when the operator is driving this station via relay mode.
+	IsRelayDriven bool
 }
 
 var (
@@ -298,13 +310,14 @@ const (
 
 // DispatchEntry records a single station invocation in the dispatch log.
 type DispatchEntry struct {
-	Station     string
-	Verdict     DispatchVerdict
-	StartedAt   time.Time
-	Duration    time.Duration // zero while running
-	Seq         int           // monotonic within session
-	ContextUsed int           // context tokens at completion (0 = unknown)
-	ContextSize int           // context window capacity (0 = unknown)
+	Station      string
+	Verdict      DispatchVerdict
+	StartedAt    time.Time
+	Duration     time.Duration // zero while running
+	Seq          int           // monotonic within session
+	ContextUsed  int           // context tokens at completion (0 = unknown)
+	ContextSize  int           // context window capacity (0 = unknown)
+	ArtifactPath string        // path to primary artifact (empty if none)
 }
 
 // dispatchLog is the per-session append-only dispatch history.
@@ -345,8 +358,8 @@ func AppendDispatch(sessionID, station string) int {
 	return idx
 }
 
-// CompleteDispatch sets the verdict and duration on a previously appended entry.
-func CompleteDispatch(sessionID string, index int, verdict DispatchVerdict) {
+// CompleteDispatch sets the verdict, duration, and artifact path on a previously appended entry.
+func CompleteDispatch(sessionID string, index int, verdict DispatchVerdict, artifactPath string) {
 	dl, ok := dispatchLogs.Get(sessionID)
 	if !ok {
 		return
@@ -355,6 +368,7 @@ func CompleteDispatch(sessionID string, index int, verdict DispatchVerdict) {
 	if index >= 0 && index < len(dl.entries) {
 		dl.entries[index].Verdict = verdict
 		dl.entries[index].Duration = time.Since(dl.entries[index].StartedAt)
+		dl.entries[index].ArtifactPath = artifactPath
 		// Snapshot context usage from the live process state.
 		key := sessionID + ":" + dl.entries[index].Station
 		if info, ok := processStates.Get(key); ok {
@@ -389,6 +403,22 @@ func SetDispatchLog(sessionID string, entries []DispatchEntry) {
 		dl.nextSeq = entries[len(entries)-1].Seq + 1
 	}
 	dl.mu.Unlock()
+}
+
+// getDispatchSeq returns the monotonic Seq for the dispatch entry at index,
+// or -1 if the index is out of bounds. Used by the artifact registry to
+// record the logical sequence number, not the slice position.
+func getDispatchSeq(sessionID string, index int) int {
+	dl, ok := dispatchLogs.Get(sessionID)
+	if !ok {
+		return -1
+	}
+	dl.mu.Lock()
+	defer dl.mu.Unlock()
+	if index < 0 || index >= len(dl.entries) {
+		return -1
+	}
+	return dl.entries[index].Seq
 }
 
 // purgeSessionDispatchLog removes the dispatch log for a session.

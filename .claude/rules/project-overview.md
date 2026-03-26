@@ -9,7 +9,7 @@ Crucible is an **autonomous software development orchestrator**. A **Supervisor 
 ## Core Concepts
 
 - **Supervisor** — Gemini via ADK. Role-sealed: delegates to stations, never writes code directly.
-- **Stations** — External agent CLIs spawned via agentrun. Disposable workers (can exhaust context, crash, be canceled). Seven stations: `design`, `draft`, `build`, `inspect`, `review`, `verify`, `ship`.
+- **Stations** — External agent CLIs spawned via agentrun. Disposable workers (can exhaust context, crash, be canceled). Seven stations: `design`, `plan`, `build`, `inspect`, `review`, `verify`, `ship`.
 - **agentrun** — Go library (`github.com/dmora/agentrun`) wrapping agent CLIs with uniform Engine/Process/Message model. Wrapped as an ADK `functiontool`.
 - **Observation deck** — The TUI. Primary UX is observing station activity via station cards (semantic states, activity trees, verdicts, fuel gauges).
 
@@ -28,7 +28,7 @@ USER → SUPERVISOR (Gemini/ADK)
 | Station | Mode | Skill | Purpose |
 |---------|------|-------|---------|
 | `design` | — | `claude-foundry:design` | Architecture analysis |
-| `draft` | plan | — | Technical spec, read-only |
+| `plan` | plan | — | Technical spec, read-only |
 | `build` | act | `feature-dev:feature-dev` | Implementation, full write |
 | `inspect` | plan | `claude-code-quality:review-plan` | Plan validation / QC |
 | `review` | plan | `claude-code-quality:rigorous-pr-review` | Structured code review |
@@ -55,4 +55,5 @@ Aesthetic inspired by Alien, Blade Runner, Pacific Rim. Monochrome/limited palet
 - **adk-tui** (`/Users/davidmora/Projects/github.com/dmora/adk-tui`) — sibling TUI project, reference for Bubble Tea v2 patterns, render cache, panel system, powerline.
 - **agentrun** (`/Users/davidmora/Projects/github.com/dmora/agentrun`) — agent CLI abstraction library.
 - **adk-go-extras** (`/Users/davidmora/Projects/github.com/dmora/adk-go-extras`) — reusable ADK extensions (artifact persistence, notifications).
+- **Issues:** [crucible-pro issues](https://github.com/dmora/crucible-pro/issues) (private — all issues live here)
 - **GitHub Project #5** — 2-week iterations, fields: Status/Priority/Size/Iteration.

@@ -241,8 +241,8 @@ func TestRunWithRecovery_StreamingUsesRunTurnOnReplacement(t *testing.T) {
 	}()
 
 	var result strings.Builder
-	_, err := pm.recovery.Run(
-		context.Background(), tctx, pm, sessionID, task, pm.task, &result,
+	_, _, err := pm.recovery.Run(
+		context.Background(), tctx, pm, sessionID, stationInput{Task: task}, pm.task, "", &result,
 		func(_ agentrun.Message) error { return nil },
 		nil, nil,
 	)
@@ -306,8 +306,8 @@ func TestRunWithRecovery_SpawnPerTurnUsesDrain(t *testing.T) {
 	}()
 
 	var result strings.Builder
-	_, err := pm.recovery.Run(
-		context.Background(), tctx, pm, "sess-spawn", "task", pm.task,
+	_, _, err := pm.recovery.Run(
+		context.Background(), tctx, pm, "sess-spawn", stationInput{Task: "task"}, pm.task, "",
 		&result, func(_ agentrun.Message) error { return nil }, nil, nil,
 	)
 	if err != nil {
@@ -356,8 +356,8 @@ func TestRunWithRecovery_BufferInvocationScoped(t *testing.T) {
 	}()
 
 	var result1 strings.Builder
-	_, err := pm.recovery.Run(
-		context.Background(), tctx, pm, "sess-scope", "task alpha", pm.task,
+	_, _, err := pm.recovery.Run(
+		context.Background(), tctx, pm, "sess-scope", stationInput{Task: "task alpha"}, pm.task, "",
 		&result1, func(_ agentrun.Message) error { return nil }, nil, nil,
 	)
 	if err != nil {
@@ -385,8 +385,8 @@ func TestRunWithRecovery_BufferInvocationScoped(t *testing.T) {
 	}()
 
 	var result2 strings.Builder
-	_, err = pm.recovery.Run(
-		context.Background(), tctx, pm, "sess-scope", "task beta", pm.task,
+	_, _, err = pm.recovery.Run(
+		context.Background(), tctx, pm, "sess-scope", stationInput{Task: "task beta"}, pm.task, "",
 		&result2, func(_ agentrun.Message) error { return nil }, nil, nil,
 	)
 	if err != nil {
@@ -454,8 +454,8 @@ func TestRunWithRecovery_RepoStateOverwriteInLoop(t *testing.T) {
 	}()
 
 	var result strings.Builder
-	_, err := pm.recovery.Run(
-		context.Background(), tctx, pm, "sess-repo", "task", pm.task,
+	_, _, err := pm.recovery.Run(
+		context.Background(), tctx, pm, "sess-repo", stationInput{Task: "task"}, pm.task, "",
 		&result, func(_ agentrun.Message) error { return nil }, nil, nil,
 	)
 	if err != nil {
@@ -538,8 +538,8 @@ func TestRunWithRecovery_SkillWrappingOnReplacement(t *testing.T) {
 	}()
 
 	var result strings.Builder
-	_, err := pm.recovery.Run(
-		context.Background(), tctx, pm, "sess-skill", "implement X", pm.task,
+	_, _, err := pm.recovery.Run(
+		context.Background(), tctx, pm, "sess-skill", stationInput{Task: "implement X"}, pm.task, "",
 		&result, func(_ agentrun.Message) error { return nil }, nil, nil,
 	)
 	if err != nil {
@@ -585,8 +585,8 @@ func TestRunWithRecovery_SpawnPerTurnReplacement(t *testing.T) {
 	}()
 
 	var result strings.Builder
-	_, err := pm.recovery.Run(
-		context.Background(), tctx, pm, "sess-spt-replace", "implement Y", pm.task,
+	_, _, err := pm.recovery.Run(
+		context.Background(), tctx, pm, "sess-spt-replace", stationInput{Task: "implement Y"}, pm.task, "",
 		&result, func(_ agentrun.Message) error { return nil }, nil, nil,
 	)
 	if err != nil {

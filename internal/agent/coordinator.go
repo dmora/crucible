@@ -1,12 +1,15 @@
 package agent
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"sync/atomic"
+	"time"
 
 	"google.golang.org/adk/artifact"
 	adkmodel "google.golang.org/adk/model"
@@ -19,6 +22,7 @@ import (
 	"github.com/dmora/crucible/internal/config"
 	"github.com/dmora/crucible/internal/csync"
 	"github.com/dmora/crucible/internal/message"
+	"github.com/dmora/crucible/internal/oauth"
 	"github.com/dmora/crucible/internal/permission"
 	"github.com/dmora/crucible/internal/pubsub"
 	"github.com/dmora/crucible/internal/session"
@@ -46,12 +50,26 @@ type Coordinator interface {
 	ProcessStates() map[string]ProcessInfo
 	HydrateProcessStates(ctx context.Context, sessionID string) error
 	ExecuteUserShell(ctx context.Context, sessionID, command string) error
+	ReloadStations()
 	SetHold()
 	ClearHold()
 	IsHoldActive() bool
 	WorktreeInfo(sessionID string) *WorktreeInfoView
 	SetWorktreeInfo(sessionID string, cwd, branch string)
 	PurgeSession(sessionID string)
+
+	// SkipArtifactCheck sets a session-level flag that bypasses artifact enforcement.
+	SkipArtifactCheck(ctx context.Context, sessionID string) error
+
+	// Relay mode: direct operator-to-station communication.
+	StartRelay(ctx context.Context, sessionID, station string) error
+	SendRelay(ctx context.Context, sessionID, message string) error
+	StopRelay(ctx context.Context, sessionID string) error
+	SwitchRelay(ctx context.Context, sessionID, newStation string) error
+	CancelRelayTurn(sessionID string)
+	RelayTarget(sessionID string) *string
+	IsRelayActive(sessionID string) bool
+	IsRelayTurnBusy(sessionID string) bool
 }
 
 // WorktreeInfoView is an exported view of worktree state for UI consumers.
@@ -299,53 +317,79 @@ func (c *coordinator) buildAgentModels(ctx context.Context) (Model, Model, error
 // buildGeminiModel creates an ADK LLM for a Gemini model using the provider config
 // to determine the backend (Gemini API vs Vertex AI) and auth method.
 func buildGeminiModel(ctx context.Context, modelName string, providerCfg config.ProviderConfig) (adkmodel.LLM, config.AuthInfo, error) {
-	var clientCfg genai.ClientConfig
-	var auth config.AuthInfo
-
 	retryCfg := DefaultRetryTransportConfig()
-
-	switch providerCfg.Backend {
-	case config.GeminiBackendVertex:
-		// Vertex AI uses ADC (Application Default Credentials). We must build
-		// an OAuth2 transport so the retry layer wraps an authenticated base.
-		ts, tsErr := google.DefaultTokenSource(ctx, "https://www.googleapis.com/auth/cloud-platform")
-		if tsErr != nil {
-			return nil, config.AuthInfo{}, fmt.Errorf("vertex AI credentials: %w", tsErr)
-		}
-		authedTransport := &oauth2.Transport{Source: ts, Base: http.DefaultTransport}
-		clientCfg = genai.ClientConfig{
-			Backend:    genai.BackendVertexAI,
-			Project:    providerCfg.Project,
-			Location:   providerCfg.Location,
-			HTTPClient: &http.Client{Transport: NewRetryTransport(authedTransport, retryCfg)},
-		}
-		method, user := config.DetectVertexAuth()
-		auth = config.AuthInfo{
-			Backend:  config.GeminiBackendVertex,
-			Method:   method,
-			User:     user,
-			Project:  providerCfg.Project,
-			Location: providerCfg.Location,
-		}
-	default: // GeminiBackendAPI or empty
-		clientCfg = genai.ClientConfig{
-			APIKey:     providerCfg.APIKey,
-			Backend:    genai.BackendGeminiAPI,
-			HTTPClient: &http.Client{Transport: NewRetryTransport(http.DefaultTransport, retryCfg)},
-		}
-		auth = config.AuthInfo{
-			Backend: config.GeminiBackendAPI,
-			Method:  config.AuthMethodAPIKey,
-			User:    config.MaskAPIKey(providerCfg.APIKey),
-		}
+	clientCfg, auth, err := resolveCredential(ctx, providerCfg, retryCfg)
+	if err != nil {
+		return nil, config.AuthInfo{}, fmt.Errorf("resolve credential: %w", err)
 	}
-
 	llm, err := gemini.NewModel(ctx, modelName, &clientCfg)
 	if err != nil {
 		return nil, config.AuthInfo{}, fmt.Errorf("gemini model %q: %w", modelName, err)
 	}
 	slog.Debug("Built Gemini model", "model", modelName, "backend", auth.Backend, "method", auth.Method)
 	return llm, auth, nil
+}
+
+func resolveCredential(ctx context.Context, prov config.ProviderConfig, retryCfg RetryTransportConfig) (genai.ClientConfig, config.AuthInfo, error) {
+	cred := prov.ActiveCredential()
+	loc := cmp.Or(prov.Location, "us-central1")
+	switch cred.Kind {
+	case config.CredentialAPIKey:
+		return genai.ClientConfig{
+			APIKey: cred.APIKey, Backend: genai.BackendGeminiAPI,
+			HTTPClient: &http.Client{Transport: NewRetryTransport(http.DefaultTransport, retryCfg)},
+		}, config.AuthInfo{Backend: config.GeminiBackendAPI, Method: config.AuthMethodAPIKey, User: config.MaskAPIKey(cred.APIKey)}, nil
+
+	case config.CredentialOAuth:
+		if cred.OAuthToken == nil {
+			return genai.ClientConfig{}, config.AuthInfo{}, errors.New("OAuth credential selected but no token found")
+		}
+		// Use a reusable token source that auto-refreshes via the refresh token.
+		oauthConf := oauth.OAuthConfig()
+		tok := &oauth2.Token{
+			AccessToken:  cred.OAuthToken.AccessToken,
+			RefreshToken: cred.OAuthToken.RefreshToken,
+			Expiry:       time.Unix(cred.OAuthToken.ExpiresAt, 0),
+		}
+		ts := oauthConf.TokenSource(ctx, tok)
+		return genai.ClientConfig{
+			Backend:    genai.BackendGeminiAPI,
+			HTTPClient: &http.Client{Transport: NewRetryTransport(&oauth2.Transport{Source: ts, Base: http.DefaultTransport}, retryCfg)},
+			HTTPOptions: genai.HTTPOptions{
+				BaseURL:    "https://cloudcode-pa.googleapis.com",
+				APIVersion: "v1internal",
+			},
+		}, config.AuthInfo{Backend: config.GeminiBackendAPI, Method: config.AuthMethodOAuth, User: "Google Account"}, nil
+
+	case config.CredentialServiceAccount:
+		data, err := os.ReadFile(cred.CredentialsFile) //nolint:gosec // user-controlled path is expected
+		if err != nil {
+			return genai.ClientConfig{}, config.AuthInfo{}, fmt.Errorf("read service account key: %w", err)
+		}
+		creds, err := google.CredentialsFromJSON(ctx, data, "https://www.googleapis.com/auth/cloud-platform") //nolint:staticcheck // SA1019: no replacement available in current SDK version
+		if err != nil {
+			return genai.ClientConfig{}, config.AuthInfo{}, fmt.Errorf("parse service account key: %w", err)
+		}
+		method, user := config.ReadCredentialsFile(cred.CredentialsFile)
+		return genai.ClientConfig{
+			Backend: genai.BackendVertexAI, Project: prov.Project, Location: loc,
+			HTTPClient: &http.Client{Transport: NewRetryTransport(&oauth2.Transport{Source: creds.TokenSource, Base: http.DefaultTransport}, retryCfg)},
+		}, config.AuthInfo{Backend: config.GeminiBackendVertex, Method: method, User: user, Project: prov.Project, Location: loc}, nil
+
+	case config.CredentialADC:
+		ts, err := google.DefaultTokenSource(ctx, "https://www.googleapis.com/auth/cloud-platform")
+		if err != nil {
+			return genai.ClientConfig{}, config.AuthInfo{}, fmt.Errorf("ADC: %w", err)
+		}
+		method, user := config.DetectVertexAuth()
+		return genai.ClientConfig{
+			Backend: genai.BackendVertexAI, Project: prov.Project, Location: loc,
+			HTTPClient: &http.Client{Transport: NewRetryTransport(&oauth2.Transport{Source: ts, Base: http.DefaultTransport}, retryCfg)},
+		}, config.AuthInfo{Backend: config.GeminiBackendVertex, Method: method, User: user, Project: prov.Project, Location: loc}, nil
+
+	default:
+		return genai.ClientConfig{}, config.AuthInfo{}, fmt.Errorf("unknown credential kind: %d", cred.Kind)
+	}
 }
 
 func (c *coordinator) ExecuteUserShell(ctx context.Context, sessionID, command string) error {
@@ -420,6 +464,10 @@ func (c *coordinator) ProcessStates() map[string]ProcessInfo {
 	return GetProcessStates()
 }
 
+func (c *coordinator) ReloadStations() {
+	c.currentAgent.ReloadStations(c.cfg, c.cfg.Stations)
+}
+
 func (c *coordinator) SetHold() {
 	c.holdFlag.Store(true)
 }
@@ -452,12 +500,50 @@ func (c *coordinator) SetWorktreeInfo(sessionID string, cwd, branch string) {
 	}
 }
 
+// --- Relay delegation ---
+
+func (c *coordinator) StartRelay(ctx context.Context, sessionID, station string) error {
+	return c.currentAgent.StartRelay(ctx, sessionID, station)
+}
+
+func (c *coordinator) SendRelay(ctx context.Context, sessionID, msg string) error {
+	return c.currentAgent.SendRelay(ctx, sessionID, msg)
+}
+
+func (c *coordinator) StopRelay(ctx context.Context, sessionID string) error {
+	return c.currentAgent.StopRelay(ctx, sessionID)
+}
+
+func (c *coordinator) SwitchRelay(ctx context.Context, sessionID, newStation string) error {
+	return c.currentAgent.SwitchRelay(ctx, sessionID, newStation)
+}
+
+func (c *coordinator) CancelRelayTurn(sessionID string) {
+	c.currentAgent.CancelRelayTurn(sessionID)
+}
+
+func (c *coordinator) RelayTarget(sessionID string) *string {
+	return c.currentAgent.RelayTarget(sessionID)
+}
+
+func (c *coordinator) IsRelayActive(sessionID string) bool {
+	return c.currentAgent.IsRelayActive(sessionID)
+}
+
+func (c *coordinator) IsRelayTurnBusy(sessionID string) bool {
+	return c.currentAgent.IsRelayTurnBusy(sessionID)
+}
+
 // PurgeSession removes all per-session worktree state from the coordinator and agent.
 func (c *coordinator) PurgeSession(sessionID string) {
 	c.worktreeInfos.Del(sessionID)
 	if c.currentAgent != nil {
 		c.currentAgent.PurgeSession(sessionID)
 	}
+}
+
+func (c *coordinator) SkipArtifactCheck(ctx context.Context, sessionID string) error {
+	return c.currentAgent.SkipArtifactCheck(ctx, sessionID)
 }
 
 // SetWorktreeManager configures worktree provisioning for the coordinator.

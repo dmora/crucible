@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -27,15 +28,29 @@ import (
 )
 
 // stationInput is the schema for station function tools.
+// All fields are required — validation rejects empty values to force the model
+// to distribute context across structured fields instead of dumping everything in task.
 type stationInput struct {
-	Task string `json:"task" description:"The task to send to this station"`
+	Task            string   `json:"task" jsonschema:"required" description:"One-line summary of what to do."`
+	TaskDescription string   `json:"task_description" jsonschema:"required" description:"Full context — background, details, specifics, file paths, code snippets. This tool cannot see your conversation — include everything it needs."`
+	ContextHints    []string `json:"context_hints" jsonschema:"required" description:"File paths, prior tool results, or decisions to reference."`
+	Constraints     []string `json:"constraints" jsonschema:"required" description:"Boundaries and prohibitions."`
+	SuccessCriteria []string `json:"success_criteria" jsonschema:"required" description:"Observable outcomes that define done."`
 }
+
+// stationIsolationFooter is appended to every station tool description so the
+// supervisor sees the constraint at the point of filling tool call parameters.
+const stationIsolationFooter = "\n\nIMPORTANT: This tool runs in a separate context and cannot see your conversation. " +
+	"Put the one-line goal in task, full details in task_description, " +
+	"file paths and prior results in context_hints, boundaries in constraints, " +
+	"and done-criteria in success_criteria. All fields are required."
 
 // stationOutput is the return schema for station function tools.
 type stationOutput struct {
-	Result string `json:"result,omitempty" description:"The result from the station"`
-	Error  string `json:"error,omitempty"  description:"Error result from the station"`
-	Abort  bool   `json:"_abort,omitempty"` // internal marker for reload detection; no description tag
+	Result       string `json:"result,omitempty"        description:"The result"`
+	Error        string `json:"error,omitempty"         description:"Error result"`
+	ArtifactPath string `json:"artifact_path,omitempty" description:"Path to the primary artifact file produced by this station"`
+	Abort        bool   `json:"_abort,omitempty"` // internal marker for reload detection; no description tag
 }
 
 // processManager manages persistent agentrun processes for a single station.
@@ -45,7 +60,7 @@ type processManager struct {
 	processes   map[string]agentrun.Process // keyed by sessionID
 	sessionCWDs map[string]string           // per-session CWD overrides (worktree isolation)
 	engine      agentrun.Engine
-	station     string // station name (e.g. "draft", "inspect", "build")
+	station     string // station name (e.g. "plan", "inspect", "build")
 	cwd         string
 	backend     string
 	model       string
@@ -53,6 +68,12 @@ type processManager struct {
 	env         map[string]string // extra env vars for the agent process
 
 	description string // tool description for the orchestrator LLM
+
+	// Route enforcement
+	requires                   []string // stations that must complete before this one can run
+	afterDone                  []string // stations that must run after this one succeeds before it can run again
+	requiresArtifact           []string // stations whose active artifact must exist before dispatch
+	disableArtifactEnforcement bool     // overrides requiresArtifact when true
 
 	// Harness components
 	gate     *GateController
@@ -123,16 +144,20 @@ func newStationProcessManager(station, cwd string, cfg config.StationConfig, con
 	}
 
 	pm := &processManager{
-		processes:   make(map[string]agentrun.Process),
-		sessionCWDs: make(map[string]string),
-		engine:      buildEngine(backend),
-		station:     station,
-		cwd:         cwd,
-		backend:     backend,
-		model:       model,
-		options:     options,
-		env:         env,
-		description: cfg.Description,
+		processes:                  make(map[string]agentrun.Process),
+		sessionCWDs:                make(map[string]string),
+		engine:                     buildEngine(backend),
+		station:                    station,
+		cwd:                        cwd,
+		backend:                    backend,
+		model:                      model,
+		options:                    options,
+		env:                        env,
+		description:                cfg.Description,
+		requires:                   cfg.Requires,
+		afterDone:                  cfg.AfterDone,
+		requiresArtifact:           cfg.RequiresArtifact,
+		disableArtifactEnforcement: cfg.DisableArtifactEnforcement,
 	}
 
 	pm.gate = &GateController{
@@ -208,13 +233,13 @@ func (pm *processManager) stateKey(sessionID string) string {
 }
 
 // stationResumeStateKey returns the ADK session state key for persisting a
-// station's CLI resume ID (e.g. "station:draft:resume_id").
+// station's CLI resume ID (e.g. "station:plan:resume_id").
 func stationResumeStateKey(station string) string {
 	return "station:" + station + ":resume_id"
 }
 
 // stationStateKey returns the ADK session state key for persisting a
-// station's durable state (e.g. "station:draft:state").
+// station's durable state (e.g. "station:plan:state").
 func stationStateKey(station string) string {
 	return "station:" + station + ":state"
 }
@@ -234,13 +259,14 @@ type stationDurableState struct {
 // durableDispatchEntry is the JSON-serializable form of DispatchEntry for
 // persistence to ADK session state.
 type durableDispatchEntry struct {
-	Station     string `json:"station"`
-	Verdict     int    `json:"verdict"`
-	StartedAt   int64  `json:"started_at"`
-	DurationMs  int64  `json:"duration_ms"`
-	Seq         int    `json:"seq"`
-	ContextUsed int    `json:"context_used,omitempty"`
-	ContextSize int    `json:"context_size,omitempty"`
+	Station      string `json:"station"`
+	Verdict      int    `json:"verdict"`
+	StartedAt    int64  `json:"started_at"`
+	DurationMs   int64  `json:"duration_ms"`
+	Seq          int    `json:"seq"`
+	ContextUsed  int    `json:"context_used,omitempty"`
+	ContextSize  int    `json:"context_size,omitempty"`
+	ArtifactPath string `json:"artifact_path,omitempty"`
 }
 
 const dispatchLogStateKey = "dispatch_log"
@@ -254,13 +280,14 @@ func persistDispatchLog(tctx tool.Context, sessionID string) {
 	durable := make([]durableDispatchEntry, len(entries))
 	for i, e := range entries {
 		durable[i] = durableDispatchEntry{
-			Station:     e.Station,
-			Verdict:     int(e.Verdict),
-			StartedAt:   e.StartedAt.Unix(),
-			DurationMs:  e.Duration.Milliseconds(),
-			Seq:         e.Seq,
-			ContextUsed: e.ContextUsed,
-			ContextSize: e.ContextSize,
+			Station:      e.Station,
+			Verdict:      int(e.Verdict),
+			StartedAt:    e.StartedAt.Unix(),
+			DurationMs:   e.Duration.Milliseconds(),
+			Seq:          e.Seq,
+			ContextUsed:  e.ContextUsed,
+			ContextSize:  e.ContextSize,
+			ArtifactPath: e.ArtifactPath,
 		}
 	}
 	data, err := json.Marshal(durable)
@@ -303,13 +330,14 @@ func hydrateDispatchLog(sess adksession.Session, sessionID string) {
 			verdict = VerdictCanceled // dead session — mark as canceled
 		}
 		entries[i] = DispatchEntry{
-			Station:     d.Station,
-			Verdict:     verdict,
-			StartedAt:   time.Unix(d.StartedAt, 0),
-			Duration:    time.Duration(d.DurationMs) * time.Millisecond,
-			Seq:         d.Seq,
-			ContextUsed: d.ContextUsed,
-			ContextSize: d.ContextSize,
+			Station:      d.Station,
+			Verdict:      verdict,
+			StartedAt:    time.Unix(d.StartedAt, 0),
+			Duration:     time.Duration(d.DurationMs) * time.Millisecond,
+			Seq:          d.Seq,
+			ContextUsed:  d.ContextUsed,
+			ContextSize:  d.ContextSize,
+			ArtifactPath: d.ArtifactPath,
 		}
 	}
 	SetDispatchLog(sessionID, entries)
@@ -338,13 +366,13 @@ func (pm *processManager) getOrStart(ctx context.Context, sessionID, prompt, res
 		})
 	}
 
-	// Merge resume ID into options if available.
-	opts := pm.options
+	// Build per-start options: session name + optional resume ID.
+	opts := make(map[string]string, len(pm.options)+2)
+	for k, v := range pm.options {
+		opts[k] = v
+	}
+	opts[agentrun.OptionSessionName] = pm.station + ":" + sessionID
 	if resumeID != "" {
-		opts = make(map[string]string, len(pm.options)+1)
-		for k, v := range pm.options {
-			opts[k] = v
-		}
 		opts[agentrun.OptionResumeID] = resumeID
 		slog.Info("Resuming station session", "station", pm.station, "resume_id", resumeID)
 	}
@@ -503,17 +531,39 @@ func newStationTool(pm *processManager, sessionID string, description string,
 ) (tool.Tool, error) {
 	return functiontool.New(functiontool.Config{
 		Name:        pm.station,
-		Description: description,
+		Description: description + stationIsolationFooter,
 	}, func(tctx tool.Context, input stationInput) (stationOutput, error) {
-		// 1. Gate
-		approved, err := pm.gate.Check(tctx, sessionID, tctx.FunctionCallID(), input.Task, holdFlag, perms)
+		// 0. Input validation — all structured fields are required.
+		if err := validateStationInput(input); err != nil {
+			return stationOutput{Result: err.Error()}, nil
+		}
+
+		// 1a. Route enforcement — returns DENIED as a steering signal so the
+		// supervisor can dispatch the prerequisite station. Unlike gate denials,
+		// route denials do NOT abort the turn.
+		if denial, err := checkRoute(sessionID, pm.station, pm.requires, pm.afterDone); err != nil {
+			return stationOutput{}, fmt.Errorf("route check for %q: %w", pm.station, err)
+		} else if denial != "" {
+			return stationOutput{Result: denial}, nil
+		}
+
+		// 1b. Artifact enforcement — requires upstream artifacts in session state.
+		if denial, err := checkArtifact(tctx, pm.station, pm.requiresArtifact,
+			pm.disableArtifactEnforcement, sessionID); err != nil {
+			return stationOutput{}, fmt.Errorf("artifact check for %q: %w", pm.station, err)
+		} else if denial != "" {
+			return stationOutput{Result: denial}, nil
+		}
+
+		// 2. Gate
+		approved, err := pm.gate.Check(tctx, sessionID, tctx.FunctionCallID(), input, holdFlag, perms)
 		if err != nil {
 			return stationOutput{}, fmt.Errorf("gate check for %q: %w", pm.station, err)
 		}
 		if !approved {
 			turnAbort.Store(true)
 			return stationOutput{
-				Result: fmt.Sprintf("DENIED: User denied station %q execution. "+
+				Result: fmt.Sprintf("DENIED: User denied %q execution. "+
 					"Ask the user why via ask_user, or try a different approach.", pm.station),
 				Abort: true,
 			}, nil
@@ -530,16 +580,30 @@ func newStationTool(pm *processManager, sessionID string, description string,
 			pm.persist.PersistState(tctx, sessionID)
 		})
 
-		// 4. Execute with recovery
+		// 4. Assemble artifact context for prompt injection.
+		var artifactCtx string
+		if len(pm.requiresArtifact) > 0 {
+			var lines []string
+			for _, req := range pm.requiresArtifact {
+				if art, _ := getActiveArtifact(tctx, req); art != nil && art.Path != "" {
+					lines = append(lines, fmt.Sprintf("Active %s artifact: %s (v%d)", req, art.Path, art.Version))
+				}
+			}
+			if len(lines) > 0 {
+				artifactCtx = strings.Join(lines, "\n")
+			}
+		}
+
+		// 5. Execute with recovery
 		var result strings.Builder
 		ledger := GetOrCreateLedger(sessionID)
-		isError, err := pm.recovery.Run(tctx, tctx, pm, sessionID, input.Task, pm.task, &result, uiHandler, notifier, ledger)
+		isError, artifactPath, err := pm.recovery.Run(tctx, tctx, pm, sessionID, input, pm.task, artifactCtx, &result, uiHandler, notifier, ledger)
 		if err != nil {
 			if tctx.Err() != nil {
-				CompleteDispatch(sessionID, dispatchIdx, VerdictCanceled)
+				CompleteDispatch(sessionID, dispatchIdx, VerdictCanceled, "")
 				pm.stop(context.Background(), sessionID)
 			} else {
-				CompleteDispatch(sessionID, dispatchIdx, VerdictFailed)
+				CompleteDispatch(sessionID, dispatchIdx, VerdictFailed, "")
 			}
 			persistDispatchLog(tctx, sessionID)
 			return stationOutput{}, fmt.Errorf("station %q: %w", pm.station, err)
@@ -550,16 +614,27 @@ func newStationTool(pm *processManager, sessionID string, description string,
 		if isError {
 			verdict = VerdictFailed
 		}
-		CompleteDispatch(sessionID, dispatchIdx, verdict)
+		resolved := resolveArtifactPath(artifactPath, pm.resolvedCWD(sessionID))
+		CompleteDispatch(sessionID, dispatchIdx, verdict, resolved)
 		pm.observer.CompleteTurn(sessionID)
 		pm.persist.PersistState(tctx, sessionID)
 		persistDispatchLog(tctx, sessionID)
 		pm.persist.SaveArtifact(tctx, result.String())
 
+		// Write to artifact registry on success with a non-empty path.
+		if verdict == VerdictDone && resolved != "" {
+			dispatchSeq := getDispatchSeq(sessionID, dispatchIdx)
+			setActiveArtifact(tctx, pm.station, resolved, dispatchSeq)
+		}
+
 		if isError {
 			return stationOutput{Error: result.String()}, nil
 		}
-		return stationOutput{Result: result.String()}, nil
+		slog.Info("Station artifact path", "station", pm.station, "raw", artifactPath, "resolved", resolved)
+		return stationOutput{
+			Result:       result.String(),
+			ArtifactPath: resolved,
+		}, nil
 	})
 }
 
@@ -613,6 +688,18 @@ func captureRepoState(ctx context.Context, cwd string) (string, error) {
 		result = result[:maxRepoStateLen]
 	}
 	return result, nil
+}
+
+// resolveArtifactPath resolves a raw path against the station's CWD.
+// Returns the resolved absolute path, or "" if rawPath is empty.
+func resolveArtifactPath(rawPath, cwd string) string {
+	if rawPath == "" {
+		return ""
+	}
+	if filepath.IsAbs(rawPath) {
+		return rawPath
+	}
+	return filepath.Join(cwd, rawPath)
 }
 
 // computeStationCost estimates cost from model pricing when agentrun's

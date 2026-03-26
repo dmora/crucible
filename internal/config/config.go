@@ -139,6 +139,11 @@ type ProviderConfig struct {
 	APIKeyTemplate string `json:"-"`
 	// OAuthToken for providers that use OAuth2 authentication.
 	OAuthToken *oauth.Token `json:"oauth,omitempty" jsonschema:"description=OAuth2 token for authentication with the provider"`
+	// CredentialsFile is the path to a Google service account JSON key file.
+	// When set, Vertex AI uses this file instead of ADC.
+	CredentialsFile string `json:"credentials_file,omitempty" jsonschema:"description=Path to service account JSON key file for Vertex AI"`
+	// Credential is the canonical credential for this provider (new unified type).
+	Credential Credential `json:"credential,omitempty"`
 
 	// Backend selects the Google AI backend: "gemini-api" (default) or "vertex-ai".
 	// If empty, auto-detected from env vars (GEMINI_API_KEY → gemini-api, GOOGLE_CLOUD_PROJECT → vertex-ai).
@@ -410,6 +415,23 @@ type StationConfig struct {
 	// These are merged with the parent process environment by agentrun.MergeEnv —
 	// os.Environ() provides the base, and Env entries override matching keys.
 	Env map[string]string `json:"env,omitempty"`
+	// Requires lists station names that must have completed (VerdictDone) in
+	// the session's dispatch log before this station can run.
+	Requires []string `json:"requires,omitempty"`
+	// AfterDone lists station names that must have completed (VerdictDone)
+	// more recently than this station's last VerdictDone before this station
+	// can dispatch again. Failed/canceled dispatches do not trigger this
+	// constraint, allowing retries.
+	AfterDone []string `json:"after_done,omitempty"`
+	// RequiresArtifact lists station names whose active artifact must exist
+	// in session state before this station can dispatch. Checked after route
+	// enforcement, before gate. Empty = no artifact requirement.
+	RequiresArtifact []string `json:"requires_artifact,omitempty"`
+	// DisableArtifactEnforcement overrides RequiresArtifact when true.
+	// Exists because jsons.Merge appends arrays — setting requires_artifact:[]
+	// in user config does NOT clear the default. This boolean provides a
+	// non-additive escape hatch.
+	DisableArtifactEnforcement bool `json:"disable_artifact_enforcement,omitempty"`
 }
 
 type ToolLs struct {
@@ -465,11 +487,68 @@ type Config struct {
 	// TODO: find a better way to do this this should probably not be part of the config
 	resolver       VariableResolver
 	dataConfigDir  string             `json:"-"`
+	loadedPaths    []string           `json:"-"` // config paths in merge order (lowest→highest priority)
 	knownProviders []ProviderMetadata `json:"-"`
 }
 
 func (c *Config) WorkingDir() string {
 	return c.workingDir
+}
+
+// LoadedPaths returns the config file paths in merge order (lowest→highest priority).
+func (c *Config) LoadedPaths() []string {
+	return c.loadedPaths
+}
+
+// ConfigScope identifies which config layer holds an override.
+type ConfigScope string
+
+const (
+	ConfigScopeDefault ConfigScope = "default" // only in DefaultStations, no file override
+	ConfigScopeUser    ConfigScope = "user"    // ~/.config/crucible/crucible.json
+	ConfigScopeGlobal  ConfigScope = "global"  // ~/.local/share/crucible/crucible.json
+	ConfigScopeProject ConfigScope = "project" // project-level crucible.json
+)
+
+// classifyPath determines which scope a config file path belongs to.
+func (c *Config) classifyPath(path string) ConfigScope {
+	if path == GlobalConfig() {
+		return ConfigScopeUser
+	}
+	if path == GlobalConfigData() || path == c.dataConfigDir {
+		return ConfigScopeGlobal
+	}
+	return ConfigScopeProject
+}
+
+// ProjectConfigPath returns the most specific project-level config path.
+// Falls back to {workingDir}/crucible.json if no project config was loaded.
+func (c *Config) ProjectConfigPath() string {
+	for i := len(c.loadedPaths) - 1; i >= 0; i-- {
+		if c.classifyPath(c.loadedPaths[i]) == ConfigScopeProject {
+			return c.loadedPaths[i]
+		}
+	}
+	if c.workingDir != "" {
+		return filepath.Join(c.workingDir, appName+".json")
+	}
+	return ""
+}
+
+// StationScope determines which config file layer holds the override for a station.
+func (c *Config) StationScope(stationName string) ConfigScope {
+	key := "stations." + stationName
+	for i := len(c.loadedPaths) - 1; i >= 0; i-- {
+		path := c.loadedPaths[i]
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		if gjson.Get(string(data), key).Exists() {
+			return c.classifyPath(path)
+		}
+	}
+	return ConfigScopeDefault
 }
 
 // KnownProviders returns the provider catalog loaded at startup.
@@ -664,45 +743,105 @@ func (c *Config) HasConfigField(key string) bool {
 }
 
 func (c *Config) SetConfigField(key string, value any) error {
-	data, err := os.ReadFile(c.dataConfigDir)
+	return writeConfigField(c.dataConfigDir, key, value)
+}
+
+func (c *Config) RemoveConfigField(key string) error {
+	return removeConfigField(c.dataConfigDir, key)
+}
+
+// SetScopedConfigField writes a config field to the file for the given scope.
+func (c *Config) SetScopedConfigField(key string, value any, scope ConfigScope) error {
+	path := c.writePathForScope(scope)
+	if path == "" {
+		return fmt.Errorf("no writable config path for scope %q", scope)
+	}
+	// Register newly created config path so scope lookups (e.g. StationScope)
+	// can find it without requiring a full config reload.
+	if !slices.Contains(c.loadedPaths, path) {
+		c.loadedPaths = append(c.loadedPaths, path)
+	}
+	return writeConfigField(path, key, value)
+}
+
+// RemoveScopedConfigField removes a config field from the file for the given scope.
+func (c *Config) RemoveScopedConfigField(key string, scope ConfigScope) error {
+	path := c.writePathForScope(scope)
+	if path == "" {
+		return fmt.Errorf("no writable config path for scope %q", scope)
+	}
+	return removeConfigField(path, key)
+}
+
+func (c *Config) writePathForScope(scope ConfigScope) string {
+	switch scope {
+	case ConfigScopeProject:
+		return c.ProjectConfigPath()
+	case ConfigScopeGlobal:
+		return c.dataConfigDir
+	case ConfigScopeUser:
+		return GlobalConfig()
+	default:
+		return "" // default scope is not writable
+	}
+}
+
+// writeConfigField is the shared read-modify-write helper for config file updates.
+func writeConfigField(path, key string, value any) error {
+	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			data = []byte("{}")
 		} else {
-			return fmt.Errorf("failed to read config file: %w", err)
+			return fmt.Errorf("failed to read config file %s: %w", path, err)
 		}
 	}
-
 	newValue, err := sjson.Set(string(data), key, value)
 	if err != nil {
 		return fmt.Errorf("failed to set config field %s: %w", key, err)
 	}
-	if err := os.MkdirAll(filepath.Dir(c.dataConfigDir), 0o755); err != nil {
-		return fmt.Errorf("failed to create config directory %q: %w", c.dataConfigDir, err)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("failed to create config directory: %w", err)
 	}
-	if err := os.WriteFile(c.dataConfigDir, []byte(newValue), 0o600); err != nil {
-		return fmt.Errorf("failed to write config file: %w", err)
-	}
-	return nil
+	return os.WriteFile(path, []byte(newValue), 0o600)
 }
 
-func (c *Config) RemoveConfigField(key string) error {
-	data, err := os.ReadFile(c.dataConfigDir)
+// removeConfigField is the shared read-modify-write helper for config field removal.
+func removeConfigField(path, key string) error {
+	data, err := os.ReadFile(path)
 	if err != nil {
-		return fmt.Errorf("failed to read config file: %w", err)
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to read config file %s: %w", path, err)
 	}
-
 	newValue, err := sjson.Delete(string(data), key)
 	if err != nil {
 		return fmt.Errorf("failed to delete config field %s: %w", key, err)
 	}
-	if err := os.MkdirAll(filepath.Dir(c.dataConfigDir), 0o755); err != nil {
-		return fmt.Errorf("failed to create config directory %q: %w", c.dataConfigDir, err)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("failed to create config directory: %w", err)
 	}
-	if err := os.WriteFile(c.dataConfigDir, []byte(newValue), 0o600); err != nil {
-		return fmt.Errorf("failed to write config file: %w", err)
+	return os.WriteFile(path, []byte(newValue), 0o600)
+}
+
+// ActiveCredential returns the canonical Credential for this provider.
+// If the new Credential field is set, it is authoritative. Otherwise, infers
+// from legacy fields for backward compatibility.
+func (p ProviderConfig) ActiveCredential() Credential {
+	if p.Credential != (Credential{}) {
+		return p.Credential
 	}
-	return nil
+	if p.OAuthToken != nil && p.OAuthToken.AccessToken != "" {
+		return Credential{Kind: CredentialOAuth, OAuthToken: p.OAuthToken}
+	}
+	if p.APIKey != "" {
+		return Credential{Kind: CredentialAPIKey, APIKey: p.APIKey}
+	}
+	if p.CredentialsFile != "" {
+		return Credential{Kind: CredentialServiceAccount, CredentialsFile: p.CredentialsFile}
+	}
+	return Credential{Kind: CredentialADC}
 }
 
 // RefreshOAuthToken refreshes the OAuth token for the given provider.
@@ -711,61 +850,122 @@ func (c *Config) RefreshOAuthToken(_ context.Context, providerID string) error {
 	return fmt.Errorf("OAuth refresh not supported for provider %s", providerID)
 }
 
-func (c *Config) SetProviderAPIKey(providerID string, apiKey any) error {
-	var providerConfig ProviderConfig
-	var exists bool
-	var setKeyOrToken func()
-
-	switch v := apiKey.(type) {
-	case string:
-		if err := c.SetConfigField(fmt.Sprintf("providers.%s.api_key", providerID), v); err != nil {
-			return fmt.Errorf("failed to save api key to config file: %w", err)
+// SetProviderCredential atomically sets the credential for a provider,
+// persists it to disk, and clears stale legacy fields.
+func (c *Config) SetProviderCredential(providerID string, cred Credential) error {
+	prov, ok := c.Providers.Get(providerID)
+	if !ok {
+		var found *ProviderMetadata
+		for _, p := range c.knownProviders {
+			if p.ID == providerID {
+				found = &p
+				break
+			}
 		}
-		setKeyOrToken = func() { providerConfig.APIKey = v }
-	case *oauth.Token:
-		if err := cmp.Or(
-			c.SetConfigField(fmt.Sprintf("providers.%s.api_key", providerID), v.AccessToken),
-			c.SetConfigField(fmt.Sprintf("providers.%s.oauth", providerID), v),
-		); err != nil {
-			return err
+		if found == nil {
+			return fmt.Errorf("provider %q not found in known providers", providerID)
 		}
-		setKeyOrToken = func() {
-			providerConfig.APIKey = v.AccessToken
-			providerConfig.OAuthToken = v
-		}
-	}
-
-	providerConfig, exists = c.Providers.Get(providerID)
-	if exists {
-		setKeyOrToken()
-		c.Providers.Set(providerID, providerConfig)
-		return nil
-	}
-
-	var foundProvider *ProviderMetadata
-	for _, p := range c.knownProviders {
-		if p.ID == providerID {
-			foundProvider = &p
-			break
-		}
-	}
-
-	if foundProvider != nil {
-		providerConfig = ProviderConfig{
+		prov = ProviderConfig{
 			ID:           providerID,
-			Name:         foundProvider.Name,
-			BaseURL:      foundProvider.APIEndpoint,
-			Type:         foundProvider.Type,
-			Disable:      false,
+			Name:         found.Name,
+			BaseURL:      found.APIEndpoint,
+			Type:         found.Type,
 			ExtraHeaders: make(map[string]string),
 			ExtraParams:  make(map[string]string),
-			Models:       foundProvider.Models,
+			Models:       found.Models,
 		}
-		setKeyOrToken()
-	} else {
-		return fmt.Errorf("provider with ID %s not found in known providers", providerID)
 	}
-	c.Providers.Set(providerID, providerConfig)
+	prov.Credential = cred
+	prov.Backend = cred.Backend()
+	prov.APIKey = ""
+	prov.OAuthToken = nil
+	prov.CredentialsFile = ""
+	switch cred.Kind {
+	case CredentialAPIKey:
+		prov.APIKey = cred.APIKey
+	case CredentialOAuth:
+		prov.OAuthToken = cred.OAuthToken
+	case CredentialServiceAccount:
+		prov.CredentialsFile = cred.CredentialsFile
+	}
+	prefix := fmt.Sprintf("providers.%s", providerID)
+	if err := c.persistProviderFields(prefix, &prov); err != nil {
+		return err
+	}
+	c.Providers.Set(providerID, prov)
+	return nil
+}
+
+// UpdateProvider atomically reads, mutates, persists, and sets a provider config.
+// The mutate function receives a pointer to the copy — changes are applied only if
+// mutate returns nil.
+func (c *Config) UpdateProvider(providerID string, mutate func(*ProviderConfig) error) error {
+	prov, ok := c.Providers.Get(providerID)
+	if !ok {
+		return fmt.Errorf("provider %q not found", providerID)
+	}
+
+	if err := mutate(&prov); err != nil {
+		return err
+	}
+
+	prefix := fmt.Sprintf("providers.%s", providerID)
+	if err := c.persistProviderFields(prefix, &prov); err != nil {
+		return err
+	}
+
+	c.Providers.Set(providerID, prov)
+	return nil
+}
+
+func (c *Config) persistProviderFields(prefix string, prov *ProviderConfig) error {
+	if err := c.SetConfigField(prefix+".backend", prov.Backend); err != nil {
+		return err
+	}
+	for _, kv := range []struct {
+		val string
+		key string
+	}{
+		{prov.CredentialsFile, prefix + ".credentials_file"},
+		{prov.APIKey, prefix + ".api_key"},
+		{prov.Project, prefix + ".project"},
+		{prov.Location, prefix + ".location"},
+	} {
+		if kv.val != "" {
+			if err := c.SetConfigField(kv.key, kv.val); err != nil {
+				return err
+			}
+		}
+	}
+	if prov.OAuthToken != nil {
+		if err := c.SetConfigField(prefix+".oauth", prov.OAuthToken); err != nil {
+			return err
+		}
+	}
+	if prov.Credential != (Credential{}) {
+		if err := c.SetConfigField(prefix+".credential", prov.Credential); err != nil {
+			return err
+		}
+	}
+	return c.removeEmptyProviderFields(prefix, prov)
+}
+
+func (c *Config) removeEmptyProviderFields(prefix string, prov *ProviderConfig) error {
+	for _, kv := range []struct {
+		empty bool
+		key   string
+	}{
+		{prov.APIKey == "", prefix + ".api_key"},
+		{prov.OAuthToken == nil, prefix + ".oauth"},
+		{prov.CredentialsFile == "", prefix + ".credentials_file"},
+		{prov.Credential == (Credential{}), prefix + ".credential"},
+	} {
+		if kv.empty {
+			if err := c.RemoveConfigField(kv.key); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
 }
 
@@ -825,76 +1025,79 @@ func (c *Config) SetupAgents() {
 	}
 }
 
-// DefaultStations are the factory stations registered when no user config exists.
+// DefaultStations defines the tools registered when no user config exists.
 var DefaultStations = map[string]StationConfig{
 	// Soft read-only (accepted risk): design has no Options{"mode":"plan"} because
 	// plan mode triggers a lower-quality explorer model in Claude Code. The
 	// claude-foundry:design skill enforces read-only behavior via prompt instead.
-	// This is an intentional trade-off: better model quality at the cost of a
-	// prompt-enforced (not system-enforced) read-only boundary.
 	//
-	// Steering assumes draft is enabled. If draft is disabled by user config,
-	// design's steering routes to a missing station. Users who disable draft
+	// Steering assumes plan is enabled. If plan is disabled by user config,
+	// design's steering routes to a missing tool. Users who disable plan
 	// should also customize design's steering or disable design.
 	"design": {
 		Backend:      "claude",
-		Description:  "Send work to the design station for architectural analysis and solution design. The station has read-only access to the project workspace. Use for tasks involving architectural decisions, multiple valid approaches, cross-cutting concerns, or high blast-radius changes. The station explores the solution space, evaluates trade-offs, and produces a design document with decisions and rationale. It saves the design document to a file and reports the path — extract this path and pass it to draft for implementation planning. The station retains context across calls.",
+		Description:  "Analyze architecture, evaluate trade-offs, and produce a design document. Saves the document to a file and returns the path. Retains context across calls.",
 		Skill:        "claude-foundry:design",
 		ArtifactType: "design",
-		Steering:     "Design station returned a design document. Extract the design file path from the result. Send the design to draft — include the design file path so draft can read it and produce an implementation plan aligned with the design decisions. Do not skip drafting.",
+		Steering:     "Design produced a document. Extract the file path and pass it to plan.",
 	},
-	"draft": {
+	"plan": {
 		Backend:      "claude",
-		Description:  "Send work to the drafting station — produces technical documents, plans, specifications, and analyses. The station has read-only access to the project workspace. It can analyze code, explore files, and reason about architecture, but cannot modify anything. The station saves plans to files and reports the file path in its response — extract this path and pass it to downstream stations (inspect, build). Do NOT suggest filenames; the station chooses its own. The station retains context across calls within this session.",
+		Description:  "Produce technical plans, specifications, and analyses. Saves plans to files and returns the file path. Do not suggest filenames. Retains context across calls.",
 		ArtifactType: "spec",
 		Options: map[string]string{
 			"mode": "plan",
 		},
-		Steering: "Draft station returned a plan. Extract the plan file path from the result. " +
-			"Send the plan to inspect for verification before dispatching to build. Do not skip inspection.",
+		Steering: "Plan produced a specification. The artifact_path field contains the file path. " +
+			"Pass this path to inspect before build.",
 	},
 	"inspect": {
-		Backend:      "opencode-acp",
-		Description:  "Send work to the inspection station for quality control. It has read-only access to the workspace. Primary use: validate plans and specifications before they reach build — include the plan file path so it can read and evaluate directly. Secondary use: quick validation of code output as a reinforcement check. The station retains context across calls.",
-		Skill:        "review-plan",
-		ArtifactType: "report",
-		Steering: "Inspect station returned its verdict. If it passed — dispatch to build with the plan file path. " +
-			"If it found critical issues — send findings back to draft to revise. Do not forward a rejected plan to build.",
+		Backend:          "opencode-acp",
+		Description:      "Validate plans and specifications before implementation. Include the plan file path so it can read and evaluate directly. Returns a pass/fail verdict with specific issues. Retains context across calls.",
+		Skill:            "review-plan",
+		ArtifactType:     "report",
+		RequiresArtifact: []string{"plan"},
+		Steering: "Inspect verdict received. If passed — dispatch build (the plan artifact is auto-injected). " +
+			"If critical issues — dispatch plan to revise.",
 	},
 	"build": {
-		Backend:      "claude",
-		Description:  "Send implementation work to the build station — it has full read-write access to the project workspace. It can create files, edit code, run commands, and execute tests. Use for implementing approved plans, applying patches, and running build/test cycles. The station retains context across calls within this session.",
-		Skill:        "feature-dev:feature-dev",
-		ArtifactType: "patch",
-		Steering: "Build station completed. If the task warrants quality validation, send to review or verify. " +
-			"Check the result for errors or partial completion — re-dispatch to build if needed.",
+		Backend:          "claude",
+		Description:      "Implement code changes — create files, edit code, run commands, execute tests. Retains context across calls.",
+		Skill:            "feature-dev:feature-dev",
+		ArtifactType:     "patch",
+		Requires:         []string{"plan"},
+		RequiresArtifact: []string{"plan"},
+		Steering:         "Build completed. Check result for errors. If quality validation needed — use review or verify.",
 	},
 	"review": {
 		Backend:      "claude",
-		Description:  "Send code to the review station for structured code review. It has read-only access to the workspace. It reviews changes for correctness, style, conventions, and potential bugs, producing a pass/fail verdict with specific issues. Use after the build station completes implementation work.",
+		Description:  "Structured code review for correctness, style, conventions, and potential bugs. Returns a pass/fail verdict with specific issues. Retains context across calls.",
 		Skill:        "claude-code-quality:rigorous-pr-review",
 		ArtifactType: "verdict",
+		Requires:     []string{"build"},
 		Options: map[string]string{
 			"mode": "plan",
 		},
-		Steering: "Review station returned its verdict. If it passed — dispatch to the next station in the workflow (verify or ship if available), or report completion to the user. " +
-			"If it found issues — dispatch fixes back to build with specific issues listed, then re-review.",
+		Steering: "Review verdict received. If passed — continue to verify or ship. " +
+			"If issues found — use build to fix, then re-review.",
 	},
 	"verify": {
 		Backend:      "claude",
-		Description:  "Send work to the verify station for execution-based validation. It has full read-write access to the project workspace. It runs tests, executes commands, checks logs, and verifies behavior end-to-end. This is NOT a code review — it runs the code and confirms it works. Use after build completes implementation. The station can fix trivial issues it discovers (missing imports, config typos) but should report larger problems back. The station retains context across calls.",
+		Description:  "Verify that changes actually work. Auto-detects what changed (frontend, API, CLI, TUI, tests), probes available verification tools (browser, tmux, test runners), runs appropriate checks, and reports a pass/partial/fail/manual verdict. Retains context across calls.",
+		Skill:        "claude-foundry:verify",
 		ArtifactType: "verification",
-		Steering: "Verify station returned its verdict. If it passed — dispatch to ship with a summary of what was built and the issue reference to close (e.g., \"Closes #N\"). " +
-			"If ship is unavailable, report completion to the user. " +
-			"If it found failures — dispatch the failure details back to build for fixes. After build fixes, re-dispatch to verify.",
+		Requires:     []string{"review"},
+		AfterDone:    []string{"review"},
+		Steering: "Verify verdict received. If passed — use ship with a summary and issue reference (e.g., \"Closes #N\"). " +
+			"If failures — use build to fix, then re-verify.",
 	},
 	"ship": {
 		Backend:      "claude",
-		Description:  "Send work to the ship station to package verified changes into a pull request. It has full read-write access to the project workspace. It stages files, writes meaningful commit messages, pushes to a feature branch, and creates a PR via `gh pr create` with a description linking the originating issue. The PR is the deliverable — it does NOT merge. Include the issue reference and a summary of what was built in the task. Requires operator approval before execution (gated). The station retains context across calls.",
+		Description:  "Create a pull request — stage files, commit, push branch, open PR via `gh pr create` with a description linking the originating issue. The PR is the deliverable — it does not merge. Include the issue reference and a summary of what was built. Requires operator approval. Retains context across calls.",
 		ArtifactType: "pr",
+		Requires:     []string{"verify"},
 		Gate:         true,
-		Steering: "Ship station returned its result. If it created a PR — report the PR URL to the user and confirm pipeline completion. " +
-			"If it failed — review the error (auth, conflicts, permissions) and report to the user with actionable next steps.",
+		Steering:     "Ship completed. If PR created — report the PR URL. If failed — report error with next steps.",
 	},
 }
 

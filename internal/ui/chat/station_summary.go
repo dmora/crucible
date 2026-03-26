@@ -37,23 +37,25 @@ const (
 // time from live activity, phase, ToolStatus, and ToolResult — never stored
 // as a field, so it is always consistent with the card's current state.
 type StationSummary struct {
-	State       agent.OperatorState
-	FilesRead   int
-	FilesEdited int
-	CommandsRun int
-	TestsRun    int
-	Errors      int
-	LastAction  string
-	ResultLine  string
+	State        agent.OperatorState
+	FilesRead    int
+	FilesEdited  int
+	CommandsRun  int
+	TestsRun     int
+	Errors       int
+	LastAction   string
+	ResultLine   string
+	ArtifactPath string // primary artifact produced by the station (from tool result)
 }
 
 // DeriveOperatorState derives the operator-facing state from raw process data.
-// Priority: ToolStatus overrides > phase > last activity > fallback.
+// Priority: ToolStatus overrides > relay-idle > phase > last activity > fallback.
 func DeriveOperatorState(
 	activity []agent.ProcessActivity,
 	phase agent.ProcessPhase,
 	toolStatus ToolStatus,
 	resultErr bool,
+	isRelayDriven bool,
 ) agent.OperatorState {
 	// Card-level status overrides everything.
 	if state, ok := stateFromToolStatus(toolStatus); ok {
@@ -62,6 +64,12 @@ func DeriveOperatorState(
 
 	if resultErr {
 		return agent.OpStateFailed
+	}
+
+	// Relay-idle: station is relay-driven but not actively processing.
+	// When a relay turn IS active, normal states (Thinking/Reading/Editing) still show.
+	if isRelayDriven && phase == agent.PhaseIdle && len(activity) == 0 {
+		return agent.OpStateDirect
 	}
 
 	if phase == agent.PhaseThinking {
@@ -167,7 +175,7 @@ func ComputeSummary(
 	}
 
 	s := StationSummary{
-		State: DeriveOperatorState(activity, phase, toolStatus, resultErr),
+		State: DeriveOperatorState(activity, phase, toolStatus, resultErr, false),
 	}
 
 	readPaths := map[string]bool{}
@@ -184,6 +192,9 @@ func ComputeSummary(
 	}
 
 	s.ResultLine = extractResultLine(result)
+	if result != nil && result.Data != "" {
+		s.ArtifactPath = result.Data
+	}
 	return s
 }
 
@@ -519,6 +530,8 @@ func stateChipStyle(sty *styles.Styles, state agent.OperatorState) lipgloss.Styl
 		return sty.Tool.StationChipWarning
 	case agent.OpStateCanceled:
 		return sty.Tool.StateCancelled
+	case agent.OpStateDirect:
+		return sty.Tool.StationChipWarning // distinct color for relay-driven
 	case agent.OpStateEditing, agent.OpStateTesting:
 		return sty.HalfMuted
 	case agent.OpStateThinking:

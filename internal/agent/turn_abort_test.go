@@ -228,8 +228,9 @@ func TestEventsToMessages_AbortTruncatesTrailingText(t *testing.T) {
 }
 
 func TestEventsToMessages_AbortStopsSubsequentEvents(t *testing.T) {
-	// After an abort-marked FunctionResponse, subsequent events should NOT
-	// be processed — replay stops at the same point the live path did.
+	// After an abort-marked FunctionResponse, subsequent agent events in the
+	// same turn should be skipped — ghost text from post-abort LLM calls.
+	// A new user event clears the abort (tested in AbortDoesNotTruncateNextTurn).
 	events := testEvents{
 		// Agent calls tool.
 		newEvent("e1", "agent", []*genai.Part{
@@ -243,7 +244,7 @@ func TestEventsToMessages_AbortStopsSubsequentEvents(t *testing.T) {
 				Response: map[string]any{"result": "DENIED", "_abort": true},
 			}},
 		}),
-		// This event should NOT be processed.
+		// This agent event should be skipped (ghost text from same turn).
 		newEventWithFinish("e3", "agent", []*genai.Part{
 			{Text: "Ghost text from post-abort LLM call"},
 		}, "STOP"),
@@ -252,6 +253,52 @@ func TestEventsToMessages_AbortStopsSubsequentEvents(t *testing.T) {
 
 	// Only 2 messages: assistant (canceled) + tool result.
 	require.Len(t, msgs, 2)
+	for _, m := range msgs {
+		assert.NotContains(t, m.Content().Text, "Ghost text")
+	}
+}
+
+func TestEventsToMessages_AbortDoesNotTruncateNextTurn(t *testing.T) {
+	// Regression (#72): abort in one turn must not truncate subsequent turns.
+	// When the user sends a new message after an abort, the abort flag clears
+	// and agent events are processed normally.
+	events := testEvents{
+		// Agent calls tool.
+		newEvent("e1", "agent", []*genai.Part{
+			{FunctionCall: &genai.FunctionCall{ID: "fc-1", Name: "build"}},
+		}),
+		// FunctionResponse with abort.
+		newEvent("e2", "agent", []*genai.Part{
+			{FunctionResponse: &genai.FunctionResponse{
+				ID:       "fc-1",
+				Name:     "build",
+				Response: map[string]any{"result": "DENIED", "_abort": true},
+			}},
+		}),
+		// Ghost event from same turn — should be skipped.
+		newEventWithFinish("e3", "agent", []*genai.Part{
+			{Text: "Ghost text"},
+		}, "STOP"),
+		// New user message — next turn begins, abort clears.
+		newEvent("e4", "user", []*genai.Part{{Text: "I'm back, let's continue"}}),
+		// Agent responds to new user message — should be processed.
+		newEventWithFinish("e5", "agent", []*genai.Part{
+			{Text: "Welcome back"},
+		}, "STOP"),
+	}
+	msgs := eventsToMessages(events, "sess-1")
+
+	// Should have: assistant(canceled) + tool + user + assistant.
+	require.Len(t, msgs, 4)
+	assert.Equal(t, message.Assistant, msgs[0].Role)
+	assert.Equal(t, message.FinishReasonCanceled, msgs[0].FinishReason())
+	assert.Equal(t, message.Tool, msgs[1].Role)
+	assert.Equal(t, message.User, msgs[2].Role)
+	assert.Equal(t, "I'm back, let's continue", msgs[2].Content().Text)
+	assert.Equal(t, message.Assistant, msgs[3].Role)
+	assert.Equal(t, "Welcome back", msgs[3].Content().Text)
+
+	// Ghost text should not appear anywhere.
 	for _, m := range msgs {
 		assert.NotContains(t, m.Content().Text, "Ghost text")
 	}

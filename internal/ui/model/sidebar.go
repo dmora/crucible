@@ -7,7 +7,9 @@ import (
 	"charm.land/lipgloss/v2"
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/ultraviolet/layout"
+	"github.com/dmora/crucible/internal/agent"
 	"github.com/dmora/crucible/internal/config"
+	"github.com/dmora/crucible/internal/fsext"
 	"github.com/dmora/crucible/internal/ui/common"
 	"github.com/dmora/crucible/internal/ui/logo"
 	"golang.org/x/text/cases"
@@ -52,6 +54,34 @@ func (m *UI) modelInfo(width int) string {
 	return common.ModelInfo(m.com.Styles, model.Metadata.Name, providerName, reasoningInfo, authInfo, width)
 }
 
+// activePlanInfo renders the Active Plan section showing the artifact path
+// of the most recent plan station dispatch as a clickable link. Only shown
+// when the latest plan dispatch completed successfully with an artifact.
+func (m *UI) activePlanInfo(width int) string {
+	var artifactPath string
+	for i := len(m.dispatchLog) - 1; i >= 0; i-- {
+		e := m.dispatchLog[i]
+		if e.Station == "plan" {
+			if e.Verdict == agent.VerdictDone && e.ArtifactPath != "" {
+				artifactPath = e.ArtifactPath
+			}
+			break // always stop at the most recent plan, even if failed/running
+		}
+	}
+	if artifactPath == "" {
+		return ""
+	}
+
+	t := m.com.Styles
+	title := common.Section(t, t.ResourceGroupTitle.Render("Active Plan"), width)
+	displayPath := fsext.PrettyPath(artifactPath)
+	link := t.Muted.Underline(true).
+		Hyperlink("file://" + artifactPath).
+		Render(displayPath)
+
+	return lipgloss.NewStyle().Width(width).Render(fmt.Sprintf("%s\n\n%s", title, link))
+}
+
 // getDynamicHeightLimits allocates sidebar item slots using demand-based sizing
 // with station priority. Each section gets a minimum floor, then extras are
 // distributed: Stations first, then Files, then MCPs.
@@ -88,8 +118,8 @@ func getDynamicHeightLimits(availableHeight, stationDemand, fileDemand, mcpDeman
 	return minPerSection + fileAlloc, minPerSection + stationAlloc, minPerSection + mcpAlloc
 }
 
-// sidebar renders the chat sidebar containing session title, working
-// directory, model info, file list, and MCP status.
+// drawSidebar renders the chat sidebar containing session title, working
+// directory, model info, active plan, file list, and MCP status.
 func (m *UI) drawSidebar(scr uv.Screen, area uv.Rectangle) {
 	if m.session == nil {
 		return
@@ -101,8 +131,7 @@ func (m *UI) drawSidebar(scr uv.Screen, area uv.Rectangle) {
 	)
 
 	t := m.com.Styles
-	width := area.Dx()
-	height := area.Dy()
+	width, height := area.Dx(), area.Dy()
 
 	title := t.Muted.Width(width).MaxHeight(2).Render(m.session.Title)
 	cwd := common.PrettyPath(t, m.com.Config().WorkingDir(), width)
@@ -133,7 +162,13 @@ func (m *UI) drawSidebar(scr uv.Screen, area uv.Rectangle) {
 		blocks...,
 	)
 
-	_, remainingHeightArea := layout.SplitVertical(m.layout.sidebar, layout.Fixed(lipgloss.Height(sidebarHeader)))
+	// Active plan section (fixed height, before dynamic sections).
+	planSection := m.activePlanInfo(width)
+	headerHeight := lipgloss.Height(sidebarHeader)
+	if planSection != "" {
+		headerHeight += lipgloss.Height(planSection)
+	}
+	_, remainingHeightArea := layout.SplitVertical(m.layout.sidebar, layout.Fixed(headerHeight))
 	const sectionOverhead = 8 // 3 section headers (2 lines each) + 2 inter-section blanks
 	remainingHeight := remainingHeightArea.Dy() - sectionOverhead
 
@@ -147,6 +182,19 @@ func (m *UI) drawSidebar(scr uv.Screen, area uv.Rectangle) {
 	stationsSection := m.processInfo(width, maxStations, true)
 	mcpSection := m.mcpInfo(width, maxMCPs, true)
 
+	// Build final content, including plan section if present.
+	content := []string{sidebarHeader}
+	if planSection != "" {
+		content = append(content, planSection)
+	}
+	content = append(content,
+		filesSection,
+		"",
+		stationsSection,
+		"",
+		mcpSection,
+	)
+
 	uv.NewStyledString(
 		lipgloss.NewStyle().
 			MaxWidth(width).
@@ -154,12 +202,7 @@ func (m *UI) drawSidebar(scr uv.Screen, area uv.Rectangle) {
 			Render(
 				lipgloss.JoinVertical(
 					lipgloss.Left,
-					sidebarHeader,
-					filesSection,
-					"",
-					stationsSection,
-					"",
-					mcpSection,
+					content...,
 				),
 			),
 	).Draw(scr, area)

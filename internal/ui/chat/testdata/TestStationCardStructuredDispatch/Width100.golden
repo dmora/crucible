@@ -1,0 +1,20 @@
+[38;2;72;144;112m✓[m [38;2;104;144;184mBuild[m[38;2;128;136;144m · [m[38;2;88;96;104mDone[m                                                                                    
+                                                                                                  
+  [48;2;144;184;212m [m[1;38;2;220;224;230;48;2;144;184;212mTask[m[48;2;144;184;212m [m [38;2;128;136;144mImplement auth middleware for API routes[m                                                 
+         [38;2;88;96;104mThe API needs JWT-based auth middleware applied to all /api/* routes. Use the existing[m   
+         [38;2;88;96;104mtoken validator in internal/auth/jwt.go.[m                                                 
+  [48;2;42;48;56m [m[1;38;2;128;136;144;48;2;42;48;56mAssumptions[m[48;2;42;48;56m [m                                                                                   
+                     [38;2;88;96;104m· tests pass on main[m                                                         
+                     [38;2;88;96;104m· auth module exists at internal/auth[m                                        
+  [48;2;42;48;56m [m[1;38;2;128;136;144;48;2;42;48;56mContext[m[48;2;42;48;56m [m                                                                                       
+                     [38;2;88;96;104m· design plan at .crucible/plans/auth-design.md[m                              
+  [48;2;42;48;56m [m[1;38;2;128;136;144;48;2;42;48;56mConstraints[m[48;2;42;48;56m [m                                                                                   
+                     [38;2;88;96;104m· no new dependencies[m                                                        
+  [48;2;42;48;56m [m[1;38;2;128;136;144;48;2;42;48;56mSuccess Criteria[m[48;2;42;48;56m [m                                                                              
+                     [38;2;88;96;104m· all tests pass[m                                                             
+                     [38;2;88;96;104m· POST /api/login returns 200 with valid credentials[m                         
+  ├─── [38;2;88;96;104mReading middleware.go[m                                                                      
+  ├─── [38;2;88;96;104mEditing middleware.go[m                                                                      
+  ╰─── [38;2;88;96;104mRunning tests[m                                                                              
+                                                                                                  
+[38;2;88;96;104m[38;2;88;96;104mDone[m[38;2;128;136;144m · [m[38;2;88;96;104m1 files read[m[38;2;128;136;144m · [m[38;2;88;96;104m1 edited[m[38;2;128;136;144m · [m[38;2;88;96;104m1 commands[m[m                                                       

@@ -67,6 +67,17 @@ func (m *UI) loadSession(sessionID string) tea.Cmd {
 			}
 		}
 
+		// Hydrate worktree info if the session has an existing worktree on
+		// disk. This covers the case where Crucible was restarted without
+		// --worktree but the session's worktree directory still exists.
+		if mgr := m.com.App.WorktreeManager(); mgr != nil {
+			if info, ok := mgr.Status(sessionID); ok {
+				if coord := m.com.App.AgentCoordinator; coord != nil {
+					coord.SetWorktreeInfo(sessionID, info.ResolvedCWD, info.Branch)
+				}
+			}
+		}
+
 		return loadSessionMsg{
 			sessionID:     sessionID,
 			session:       &session,

@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/dmora/crucible/internal/config"
@@ -90,6 +92,20 @@ func TestNewStationProcessManagerEnv(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestNewStationToolDescriptionIncludesIsolationFooter(t *testing.T) {
+	pm := newStationProcessManager("test-station", "/tmp", config.StationConfig{}, 0)
+
+	var hold, abort atomic.Bool
+	tl, err := newStationTool(pm, "sess-1", "Run tests for the project", nil, &hold, nil, &abort)
+	assert.NoError(t, err)
+
+	desc := tl.Description()
+	assert.Contains(t, desc, "Run tests for the project", "original description preserved")
+	assert.Contains(t, desc, stationIsolationFooter, "isolation footer appended")
+	assert.True(t, strings.HasSuffix(desc, stationIsolationFooter),
+		"footer should be the suffix of the description")
 }
 
 func TestBuildTask(t *testing.T) {
@@ -202,7 +218,7 @@ func TestBuildTask(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tb := &TaskBuilder{backend: tt.backend, skill: tt.skill}
-			got := tb.Build(tt.task, tt.firstTurn)
+			got := tb.Build(stationInput{Task: tt.task}, tt.firstTurn, "")
 			assert.Equal(t, tt.want, got)
 		})
 	}

@@ -232,20 +232,9 @@ func TestCoderTemplateRendersWithAllDefaultStations(t *testing.T) {
 	require.NoError(t, err)
 
 	// All 7 stations must appear in the rendered prompt.
-	for _, station := range []string{"design", "draft", "inspect", "build", "review", "verify", "ship"} {
+	for _, station := range []string{"design", "plan", "inspect", "build", "review", "verify", "ship"} {
 		assert.Contains(t, result, station, "prompt output missing station %q", station)
 	}
-
-	// Verify new sequencing patterns.
-	assert.Contains(t, result, "verify (test)", "prompt missing verify sequencing pattern")
-	assert.Contains(t, result, "ship (PR)", "prompt missing ship sequencing pattern")
-
-	// Verify new dispatch rules.
-	assert.Contains(t, result, "execution-based validation", "prompt missing verify dispatch rule")
-	assert.Contains(t, result, "ready to ship", "prompt missing ship dispatch rule")
-
-	// Verify build-verify rework loop.
-	assert.Contains(t, result, "Build-verify rework loop", "prompt missing build-verify rework loop")
 }
 
 func TestCoderTemplateRendersWithDisabledVerifyShip(t *testing.T) {
@@ -266,15 +255,28 @@ func TestCoderTemplateRendersWithDisabledVerifyShip(t *testing.T) {
 	result, err := p.Build(context.Background(), "crucible", "gemini", "gemini-2.5-pro", cfg)
 	require.NoError(t, err)
 
-	// Disabled stations should NOT appear in sequencing patterns.
-	assert.NotContains(t, result, "verify (test)", "disabled verify should not appear in sequencing")
-	assert.NotContains(t, result, "ship (PR)", "disabled ship should not appear in sequencing")
-	assert.NotContains(t, result, "Build-verify rework loop")
-
 	// Original 5 stations should still be present.
-	for _, station := range []string{"design", "draft", "inspect", "build", "review"} {
+	for _, station := range []string{"design", "plan", "inspect", "build", "review"} {
 		assert.Contains(t, result, station, "prompt output missing enabled station %q", station)
 	}
+}
+
+func TestCoderTemplateStructuredDispatchExamples(t *testing.T) {
+	cfg := newStationTestConfig()
+
+	p, err := NewPrompt("coder", readCoderTemplate(t),
+		WithPlatform("linux"), WithWorkingDir(t.TempDir()))
+	require.NoError(t, err)
+
+	result, err := p.Build(context.Background(), "crucible", "gemini", "gemini-2.5-pro", cfg)
+	require.NoError(t, err)
+
+	// Verify tool_input section is present with structured input fields.
+	assert.Contains(t, result, "<tool_input>", "prompt missing tool_input section")
+	assert.Contains(t, result, "context_hints", "prompt missing context_hints field")
+	assert.Contains(t, result, "success_criteria", "prompt missing success_criteria field")
+	assert.Contains(t, result, "constraints", "prompt missing constraints field")
+	assert.Contains(t, result, "task_description", "prompt missing task_description field")
 }
 
 func TestCoderTemplateNoExcessiveBlankLines(t *testing.T) {

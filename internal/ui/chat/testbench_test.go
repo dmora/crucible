@@ -500,6 +500,124 @@ func TestAgenticFetchToolTreeAlignment(t *testing.T) {
 	})
 }
 
+func TestStationCardStructuredDispatch(t *testing.T) {
+	t.Parallel()
+	sty := testStyles()
+
+	activity := []agent.ProcessActivity{
+		{Kind: agent.ActivityTool, Name: "Read", Detail: "/src/internal/auth/middleware.go"},
+		{Kind: agent.ActivityTool, Name: "Edit", Detail: "/src/internal/auth/middleware.go"},
+		{Kind: agent.ActivityTool, Name: "Bash", Detail: "go test ./internal/auth/..."},
+	}
+
+	toolCall := message.ToolCall{
+		ID:   "tc_sd",
+		Name: "build",
+		Input: `{"task":"Implement auth middleware for API routes",` +
+			`"task_description":"The API needs JWT-based auth middleware applied to all /api/* routes. Use the existing token validator in internal/auth/jwt.go.",` +
+			`"assumptions":["tests pass on main","auth module exists at internal/auth"],` +
+			`"context_hints":["design plan at .crucible/plans/auth-design.md"],` +
+			`"constraints":["no new dependencies"],` +
+			`"success_criteria":["all tests pass","POST /api/login returns 200 with valid credentials"]}`,
+		State: message.ToolStateDone,
+	}
+	result := &message.ToolResult{
+		ToolCallID: "tc_sd",
+		Name:       "build",
+		Content:    "",
+	}
+
+	for _, width := range []int{30, 60, 100} {
+		t.Run(widthName(width), func(t *testing.T) {
+			t.Parallel()
+
+			st := &StationToolMessageItem{
+				stationName: "Build",
+				activity:    activity,
+			}
+			rc := &stationToolRenderContext{st: st}
+
+			opts := &ToolRenderOpts{
+				ToolCall:        toolCall,
+				Result:          result,
+				ExpandedContent: true,
+				Status:          ToolStatusSuccess,
+			}
+
+			output := rc.RenderTool(sty, width, opts)
+			golden.RequireEqual(t, []byte(output))
+			assertMaxLineWidth(t, width, output)
+		})
+	}
+
+	// Edge case: empty task_description — must not render description line.
+	t.Run("EmptyTaskDescription", func(t *testing.T) {
+		t.Parallel()
+		tc := message.ToolCall{
+			ID:   "tc_empty_desc",
+			Name: "build",
+			Input: `{"task":"Do the thing",` +
+				`"task_description":"",` +
+				`"constraints":["no regressions"]}`,
+			State: message.ToolStateDone,
+		}
+		res := &message.ToolResult{ToolCallID: "tc_empty_desc", Name: "build"}
+
+		st := &StationToolMessageItem{stationName: "Build", activity: activity}
+		rc := &stationToolRenderContext{st: st}
+		opts := &ToolRenderOpts{
+			ToolCall: tc, Result: res, ExpandedContent: true, Status: ToolStatusSuccess,
+		}
+		output := rc.RenderTool(sty, 80, opts)
+		golden.RequireEqual(t, []byte(output))
+		assertMaxLineWidth(t, 80, output)
+	})
+
+	// Edge case: all-empty params — only task, no dispatch sections.
+	t.Run("AllEmpty", func(t *testing.T) {
+		t.Parallel()
+		tc := message.ToolCall{
+			ID:    "tc_all_empty",
+			Name:  "build",
+			Input: `{"task":"Minimal task"}`,
+			State: message.ToolStateDone,
+		}
+		res := &message.ToolResult{ToolCallID: "tc_all_empty", Name: "build"}
+
+		st := &StationToolMessageItem{stationName: "Build", activity: activity}
+		rc := &stationToolRenderContext{st: st}
+		opts := &ToolRenderOpts{
+			ToolCall: tc, Result: res, ExpandedContent: true, Status: ToolStatusSuccess,
+		}
+		output := rc.RenderTool(sty, 80, opts)
+		golden.RequireEqual(t, []byte(output))
+		assertMaxLineWidth(t, 80, output)
+	})
+
+	// Edge case: blank list items — whitespace-only items must be silently dropped.
+	t.Run("BlankListItems", func(t *testing.T) {
+		t.Parallel()
+		tc := message.ToolCall{
+			ID:   "tc_blank_items",
+			Name: "build",
+			Input: `{"task":"Test blank items",` +
+				`"constraints":["real constraint","  ",""],` +
+				`"success_criteria":["tests pass",""]}`,
+			State: message.ToolStateDone,
+		}
+		res := &message.ToolResult{ToolCallID: "tc_blank_items", Name: "build"}
+
+		st := &StationToolMessageItem{stationName: "Build", activity: activity}
+		rc := &stationToolRenderContext{st: st}
+		opts := &ToolRenderOpts{
+			ToolCall: tc, Result: res, ExpandedContent: true, Status: ToolStatusSuccess,
+		}
+		output := rc.RenderTool(sty, 80, opts)
+		golden.RequireEqual(t, []byte(output))
+		assertMaxLineWidth(t, 80, output)
+	})
+}
+
 // assertMaxLineWidth checks that no rendered line exceeds the given width.
 func assertMaxLineWidth(t *testing.T, maxWidth int, output string) {
 	t.Helper()

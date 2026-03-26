@@ -28,12 +28,16 @@ func eventsToMessages(events adksession.Events, sessionID string) []message.Mess
 		if event.Content == nil {
 			continue
 		}
-		if event.Author == "user" {
+		if event.Author == adkUserID {
+			b.abortActive = false // new turn — clear abort
 			b.handleUserEvent(event)
 			continue
 		}
+		if b.abortActive {
+			continue // skip ghost agent events from aborted turn
+		}
 		if b.handleAgentEvent(event) {
-			break // abort detected — stop processing events
+			b.abortActive = true // suppress remaining agent events in this turn
 		}
 	}
 	b.finalize()
@@ -46,6 +50,7 @@ type replayBuilder struct {
 	sessionID        string
 	result           []message.Message
 	currentAssistant *message.Message
+	abortActive      bool
 }
 
 func (b *replayBuilder) flushAssistant() {
@@ -66,6 +71,12 @@ func (b *replayBuilder) ensureAssistant(event *adksession.Event) {
 	}
 }
 
+// isUserRelayEvent reports whether a text part is a <user_relay> event.
+// These are skipped during replay — relay history comes from relay:log state, not events.
+func isUserRelayEvent(text string) bool {
+	return strings.HasPrefix(strings.TrimSpace(text), "<user_relay ")
+}
+
 func (b *replayBuilder) handleUserEvent(event *adksession.Event) {
 	b.flushAssistant()
 
@@ -75,6 +86,9 @@ func (b *replayBuilder) handleUserEvent(event *adksession.Event) {
 	for _, p := range event.Content.Parts {
 		if p.Text == "" {
 			continue
+		}
+		if isUserRelayEvent(p.Text) {
+			continue // relay history comes from relay:log, not events
 		}
 		if parsed, ok := parseUserShellEvent(p.Text); ok {
 			shellParts = append(shellParts, parsed)
@@ -153,7 +167,8 @@ func parseUserShellEvent(text string) (parsedShellEvent, bool) {
 }
 
 // handleAgentEvent processes a single agent event. Returns true if an abort
-// marker was detected and the caller should stop processing events.
+// marker was detected and the caller should skip subsequent agent events
+// until the next user event.
 func (b *replayBuilder) handleAgentEvent(event *adksession.Event) bool {
 	b.ensureAssistant(event)
 
@@ -185,19 +200,49 @@ func (b *replayBuilder) applyGrounding(event *adksession.Event) {
 }
 
 func (b *replayBuilder) applyFinishReason(event *adksession.Event, hasFunctionCall bool) {
-	if hasFunctionCall || event.FinishReason == "" || event.FinishReason == genai.FinishReasonUnspecified {
-		return
+	applied := false
+
+	// Phase 1: FinishReason handling (mirrors agent_event.go:247-262)
+	hasFinish := !hasFunctionCall && !event.Partial &&
+		event.FinishReason != "" && event.FinishReason != genai.FinishReasonUnspecified
+	if hasFinish && b.currentAssistant != nil {
+		b.applyFinishPart(event)
+		applied = true
 	}
-	if b.currentAssistant == nil {
-		return
+
+	// Phase 2: ErrorCode — independent of FinishReason (mirrors agent_event.go:265-272)
+	// AddFinish replaces existing Finish part, so ErrorCode wins when both fire.
+	// Reapply usage metadata afterward since AddFinish drops the previous Finish.
+	if event.ErrorCode != "" && b.currentAssistant != nil {
+		b.currentAssistant.AddFinish(message.FinishReasonError, event.ErrorCode, event.ErrorMessage)
+		if event.UsageMetadata != nil {
+			u := usageFromMetadata(event.UsageMetadata)
+			b.currentAssistant.SetFinishTokens(u.PromptTokens, u.CandidatesTokens, u.TotalTokens)
+		}
+		applied = true
 	}
+
+	// Only flush when a finish-level change was applied. Function-call events
+	// without errors accumulate in currentAssistant; they are flushed later by
+	// processEventParts (on FunctionResponse) or finalize().
+	if applied {
+		b.flushAssistant()
+	}
+}
+
+// applyFinishPart applies FinishReason and usage metadata to the current assistant message.
+func (b *replayBuilder) applyFinishPart(event *adksession.Event) {
 	b.currentAssistant.FinishThinking()
-	b.currentAssistant.AddFinish(mapFinishReason(event.FinishReason), "", "")
+	finishReason := mapFinishReason(event.FinishReason)
+	var errMsg string
+	if finishReason == message.FinishReasonError && event.ErrorMessage != "" {
+		errMsg = event.ErrorMessage
+	}
+	b.currentAssistant.AddFinish(finishReason, "", errMsg)
 	if event.UsageMetadata != nil {
 		u := usageFromMetadata(event.UsageMetadata)
 		b.currentAssistant.SetFinishTokens(u.PromptTokens, u.CandidatesTokens, u.TotalTokens)
 	}
-	b.flushAssistant()
 }
 
 func (b *replayBuilder) finalize() {
@@ -254,6 +299,7 @@ func processEventParts(
 
 			content, isError := extractFunctionResponseContent(p.FunctionResponse)
 			metadata := extractFunctionResponseMetadata(p.FunctionResponse)
+			artifactPath := extractFunctionResponseArtifactPath(p.FunctionResponse)
 			toolMsg := message.Message{
 				ID:        event.ID + "-tool",
 				Role:      message.Tool,
@@ -262,6 +308,7 @@ func processEventParts(
 					ToolCallID: p.FunctionResponse.ID,
 					Name:       p.FunctionResponse.Name,
 					Content:    content,
+					Data:       artifactPath,
 					Metadata:   metadata,
 					IsError:    isError,
 				}},
@@ -345,7 +392,7 @@ func isAbortResponse(resp *genai.FunctionResponse) bool {
 func eventsToUserPrompts(events adksession.Events, sessionID string) []message.Message {
 	var result []message.Message
 	for event := range events.All() {
-		if event.Author != "user" || event.Content == nil {
+		if event.Author != adkUserID || event.Content == nil {
 			continue
 		}
 		msg := message.Message{

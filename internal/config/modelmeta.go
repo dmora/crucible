@@ -27,6 +27,7 @@ const (
 	AuthMethodServiceAccount   AuthMethod = "Service Account"
 	AuthMethodUserADC          AuthMethod = "ADC"
 	AuthMethodWorkloadIdentity AuthMethod = "Workload Identity"
+	AuthMethodOAuth            AuthMethod = "OAuth"
 )
 
 // AuthInfo holds the resolved authentication state for a provider.
@@ -52,6 +53,9 @@ func (a AuthInfo) HeaderDesignation() string {
 			return "VERTEX:ADC"
 		}
 	case GeminiBackendAPI:
+		if a.Method == AuthMethodOAuth {
+			return "GEMINI:OAUTH"
+		}
 		return "GEMINI:KEY"
 	default:
 		return "SYS:ONLINE"
@@ -67,7 +71,7 @@ func (a AuthInfo) HeaderDesignation() string {
 func DetectVertexAuth() (AuthMethod, string) {
 	// 1. Explicit credentials file.
 	if path := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"); path != "" {
-		method, user := readCredentialsFile(path)
+		method, user := ReadCredentialsFile(path)
 		if method != "" {
 			return method, user
 		}
@@ -75,7 +79,7 @@ func DetectVertexAuth() (AuthMethod, string) {
 
 	// 2. Well-known ADC file.
 	if path := wellKnownADCPath(); path != "" {
-		method, user := readCredentialsFile(path)
+		method, user := ReadCredentialsFile(path)
 		if method != "" {
 			return method, user
 		}
@@ -94,9 +98,9 @@ func DetectVertexAuth() (AuthMethod, string) {
 	return AuthMethodUserADC, ""
 }
 
-// readCredentialsFile reads a Google credentials JSON file and returns
+// ReadCredentialsFile reads a Google credentials JSON file and returns
 // the auth method and identity (email).
-func readCredentialsFile(path string) (AuthMethod, string) {
+func ReadCredentialsFile(path string) (AuthMethod, string) {
 	data, err := os.ReadFile(path) //nolint:gosec // user-controlled path is expected
 	if err != nil {
 		return "", ""

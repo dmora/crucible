@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/dmora/crucible/internal/db"
+	"github.com/dmora/crucible/internal/db/global"
 	"github.com/dmora/crucible/internal/event"
 	"github.com/dmora/crucible/internal/pubsub"
 	"github.com/google/uuid"
@@ -66,10 +67,11 @@ type Service interface {
 
 type service struct {
 	*pubsub.Broker[Session]
-	db        *sql.DB
-	q         *db.Queries
-	preDelete func(ctx context.Context, id string) // before DB delete (cancel agents, purge state)
-	onDelete  func(ctx context.Context, id string) // after DB commit (clean up external resources)
+	db          *sql.DB
+	q           *db.Queries
+	preDelete   func(ctx context.Context, id string) // before DB delete (cancel agents, purge state)
+	onDelete    func(ctx context.Context, id string) // after DB commit (clean up external resources)
+	globalIndex *global.Writer                       // nil if not configured
 }
 
 func (s *service) Create(ctx context.Context, title string) (Session, error) {
@@ -81,6 +83,9 @@ func (s *service) Create(ctx context.Context, title string) (Session, error) {
 		return Session{}, err
 	}
 	session := s.fromDBItem(dbSession)
+	if s.globalIndex != nil {
+		s.globalIndex.Create(ctx, session.ID, session.Title, session.CreatedAt)
+	}
 	s.Publish(pubsub.CreatedEvent, session)
 	event.SessionCreated()
 	return session, nil
@@ -122,6 +127,9 @@ func (s *service) Delete(ctx context.Context, id string) error {
 	if s.onDelete != nil {
 		s.onDelete(ctx, id)
 	}
+	if s.globalIndex != nil {
+		s.globalIndex.Delete(ctx, id)
+	}
 
 	session := s.fromDBItem(dbSession)
 	s.Publish(pubsub.DeletedEvent, session)
@@ -160,6 +168,9 @@ func (s *service) Save(ctx context.Context, session Session) (Session, error) {
 		return Session{}, err
 	}
 	session = s.fromDBItem(dbSession)
+	if s.globalIndex != nil {
+		s.globalIndex.Save(ctx, session.ID, session.Title, session.TotalTokens, session.Cost, session.PromptTokens, session.CompletionTokens, session.StationTokens, session.CreatedAt)
+	}
 	s.Publish(pubsub.UpdatedEvent, session)
 	return session, nil
 }
@@ -175,6 +186,9 @@ func (s *service) UpdateTitleAndUsage(ctx context.Context, sessionID, title stri
 		Cost:             cost,
 	}); err != nil {
 		return err
+	}
+	if s.globalIndex != nil {
+		s.globalIndex.UpdateTitleAndUsage(ctx, sessionID, title, promptTokens, completionTokens, cost)
 	}
 	// Re-fetch and publish so the UI picks up the updated title.
 	session, err := s.Get(ctx, sessionID)
@@ -218,6 +232,9 @@ func (s *service) UpdateUsage(ctx context.Context, sessionID string, promptToken
 		Cost:             costDelta,
 	}); err != nil {
 		return err
+	}
+	if s.globalIndex != nil {
+		s.globalIndex.UpdateUsage(ctx, sessionID, promptTokens, completionTokens, totalTokensDelta, stationTokensDelta, costDelta)
 	}
 	session, err := s.Get(ctx, sessionID)
 	if err != nil {
@@ -306,6 +323,11 @@ func WithPreDelete(fn func(ctx context.Context, id string)) ServiceOption {
 // Use this to clean up external resources (e.g., ADK session data).
 func WithOnDelete(fn func(ctx context.Context, id string)) ServiceOption {
 	return func(s *service) { s.onDelete = fn }
+}
+
+// WithGlobalIndex enables dual-write to the global session index.
+func WithGlobalIndex(w *global.Writer) ServiceOption {
+	return func(s *service) { s.globalIndex = w }
 }
 
 func NewService(q *db.Queries, conn *sql.DB, opts ...ServiceOption) Service {

@@ -438,3 +438,75 @@ func TestExtractFunctionResponseContent(t *testing.T) {
 		})
 	}
 }
+
+func TestEventsToMessages_ErrorCodePreserved(t *testing.T) {
+	ev := newEvent("e1", "agent", []*genai.Part{{Text: "some text"}})
+	ev.ErrorCode = "rate_limit"
+	ev.ErrorMessage = "quota exceeded"
+	// No FinishReason — only ErrorCode path fires.
+
+	msgs := eventsToMessages(testEvents{ev}, "sess-1")
+	require.Len(t, msgs, 1)
+
+	fp := msgs[0].FinishPart()
+	require.NotNil(t, fp)
+	assert.Equal(t, message.FinishReasonError, fp.Reason)
+	assert.Equal(t, "rate_limit", fp.Message)
+	assert.Equal(t, "quota exceeded", fp.Details)
+}
+
+func TestEventsToMessages_ErrorFinishWithErrorCode(t *testing.T) {
+	// FinishReason "ERROR" maps to FinishReasonUnknown via mapFinishReason.
+	// ErrorMessage is only preserved when ErrorCode is set (Phase 2).
+	ev := newEventWithFinish("e1", "agent", []*genai.Part{{Text: "blocked"}}, "ERROR")
+	ev.ErrorCode = "safety"
+	ev.ErrorMessage = "safety triggered"
+
+	msgs := eventsToMessages(testEvents{ev}, "sess-1")
+	require.Len(t, msgs, 1)
+
+	fp := msgs[0].FinishPart()
+	require.NotNil(t, fp)
+	assert.Equal(t, message.FinishReasonError, fp.Reason)
+	assert.Equal(t, "safety", fp.Message)
+	assert.Equal(t, "safety triggered", fp.Details)
+}
+
+func TestEventsToMessages_ErrorCodeOverridesFinishReason(t *testing.T) {
+	ev := newEventWithFinish("e1", "agent", []*genai.Part{{Text: "ok"}}, "STOP")
+	ev.ErrorCode = "internal"
+	ev.ErrorMessage = "server error"
+	ev.UsageMetadata = &genai.GenerateContentResponseUsageMetadata{
+		PromptTokenCount:     100,
+		CandidatesTokenCount: 50,
+		TotalTokenCount:      150,
+	}
+
+	msgs := eventsToMessages(testEvents{ev}, "sess-1")
+	require.Len(t, msgs, 1)
+
+	// ErrorCode's Phase 2 should override STOP from Phase 1.
+	fp := msgs[0].FinishPart()
+	require.NotNil(t, fp)
+	assert.Equal(t, message.FinishReasonError, fp.Reason)
+	assert.Equal(t, "internal", fp.Message)
+	assert.Equal(t, "server error", fp.Details)
+
+	// Usage tokens must survive the ErrorCode override.
+	assert.Equal(t, int64(100), fp.PromptTokens)
+	assert.Equal(t, int64(50), fp.CandidatesTokens)
+	assert.Equal(t, int64(150), fp.TotalTokens)
+}
+
+func TestEventsToMessages_PartialEventSkipped(t *testing.T) {
+	ev := newEventWithFinish("e1", "agent", []*genai.Part{{Text: "partial"}}, "STOP")
+	ev.Partial = true
+
+	msgs := eventsToMessages(testEvents{ev}, "sess-1")
+	require.Len(t, msgs, 1)
+
+	// Partial event — Phase 1 should be skipped. finalize() adds EndTurn.
+	fp := msgs[0].FinishPart()
+	require.NotNil(t, fp)
+	assert.Equal(t, message.FinishReasonEndTurn, fp.Reason)
+}

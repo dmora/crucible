@@ -33,6 +33,7 @@ func Load(workingDir, dataDir string, debug bool) (*Config, error) {
 	}
 
 	cfg.dataConfigDir = GlobalConfigData()
+	cfg.loadedPaths = configPaths
 
 	cfg.setDefaults(workingDir, dataDir)
 
@@ -222,8 +223,10 @@ func (c *Config) configureProviders(env env.Env, resolver VariableResolver, know
 			(p.ID == "gemini" && !configExists)
 		backend, project, location := resolveBackend(config.Backend, config.Project, config.Location, resolvedAPIKey, env, skipEnvDetect)
 
-		// Skip providers with no usable auth
-		if resolvedAPIKey == "" && backend != GeminiBackendVertex {
+		// Skip providers with no usable auth — but keep those using OAuth,
+		// service account credentials, or a Credential value type.
+		hasAltAuth := config.OAuthToken != nil || config.CredentialsFile != "" || config.Credential != (Credential{})
+		if resolvedAPIKey == "" && backend != GeminiBackendVertex && !hasAltAuth {
 			if configExists {
 				slog.Warn("Skipping provider due to missing API key", "provider", p.ID)
 				c.Providers.Del(p.ID)
@@ -244,6 +247,8 @@ func (c *Config) configureProviders(env env.Env, resolver VariableResolver, know
 			APIKey:             resolvedAPIKey,
 			APIKeyTemplate:     p.APIKey,
 			OAuthToken:         config.OAuthToken,
+			CredentialsFile:    config.CredentialsFile,
+			Credential:         config.Credential,
 			Type:               p.Type,
 			Disable:            config.Disable,
 			SystemPromptPrefix: config.SystemPromptPrefix,

@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Crucible Pro — Architecture & Eval</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Inter:wght@300;400;500;600;700;800;900&display=swap');
+  :root {
+    --bg: #0a0a0f; --bg-surface: #12121a; --bg-card: #1a1a26; --bg-card-hover: #22222f;
+    --amber: #f5a623; --amber-dim: #b87a18; --amber-glow: rgba(245,166,35,0.15);
+    --cyan: #4ecdc4; --cyan-dim: #2a8a83; --cyan-glow: rgba(78,205,196,0.12);
+    --green: #7fdb8a; --green-dim: #4a9952;
+    --red: #ff6b6b; --red-dim: #b84444;
+    --purple: #a78bfa; --purple-dim: #7c5fc7;
+    --text: #e8e8f0; --text-dim: #8888a0; --text-muted: #555570;
+    --border: #2a2a3a; --border-bright: #3a3a50;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:var(--bg); color:var(--text); font-family:'Inter',-apple-system,sans-serif; line-height:1.6; overflow-x:hidden; }
+
+  .hero { min-height:100vh; display:flex; flex-direction:column; justify-content:center; align-items:center; text-align:center; padding:4rem 2rem; position:relative; }
+  .hero::before { content:''; position:absolute; inset:0; background:radial-gradient(ellipse 80% 50% at 50% 0%,rgba(245,166,35,0.08),transparent),radial-gradient(ellipse 60% 40% at 30% 80%,rgba(78,205,196,0.05),transparent); pointer-events:none; }
+  .hero-label { font-family:'JetBrains Mono',monospace; font-size:0.75rem; letter-spacing:0.3em; text-transform:uppercase; color:var(--amber); margin-bottom:1.5rem; opacity:0.8; }
+  .hero h1 { font-size:clamp(2.5rem,6vw,4.5rem); font-weight:900; line-height:1.1; margin-bottom:1.5rem; background:linear-gradient(135deg,var(--text) 0%,var(--amber) 50%,var(--cyan) 100%); -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text; }
+  .hero-sub { font-size:1.2rem; color:var(--text-dim); max-width:640px; margin-bottom:3rem; line-height:1.7; }
+
+  section { max-width:1100px; margin:0 auto; padding:5rem 2rem; }
+  .section-label { font-family:'JetBrains Mono',monospace; font-size:0.65rem; letter-spacing:0.4em; text-transform:uppercase; color:var(--amber); margin-bottom:0.75rem; }
+  .section-title { font-size:2.1rem; font-weight:800; margin-bottom:1rem; line-height:1.2; }
+  .section-desc { font-size:1.05rem; color:var(--text-dim); max-width:700px; margin-bottom:3rem; line-height:1.7; }
+
+  .principle { background:var(--bg-surface); border-left:3px solid var(--amber); padding:1.5rem 2rem; margin:2rem 0; border-radius:0 8px 8px 0; }
+  .principle-label { font-family:'JetBrains Mono',monospace; font-size:0.6rem; letter-spacing:0.3em; text-transform:uppercase; color:var(--amber); margin-bottom:0.5rem; }
+  .principle p { font-size:1rem; color:var(--text); line-height:1.7; }
+  .principle.cyan { border-left-color:var(--cyan); } .principle.cyan .principle-label { color:var(--cyan); }
+  .principle.red { border-left-color:var(--red); } .principle.red .principle-label { color:var(--red); }
+  .principle.green { border-left-color:var(--green); } .principle.green .principle-label { color:var(--green); }
+
+  table { width:100%; border-collapse:collapse; margin:2rem 0; font-size:0.85rem; }
+  thead th { font-family:'JetBrains Mono',monospace; font-size:0.65rem; letter-spacing:0.15em; text-transform:uppercase; padding:0.75rem 1rem; text-align:left; border-bottom:2px solid var(--border); color:var(--text-dim); }
+  tbody td { padding:0.65rem 1rem; border-bottom:1px solid var(--border); vertical-align:top; color:var(--text-dim); }
+  tbody td:first-child { font-weight:600; color:var(--text); }
+  tbody tr:hover td { background:rgba(255,255,255,0.02); }
+
+  .stat-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:1rem; margin:2rem 0; }
+  .stat-card { background:var(--bg-surface); border:1px solid var(--border); border-radius:10px; padding:1.5rem; text-align:center; }
+  .stat-val { font-family:'JetBrains Mono',monospace; font-size:2rem; font-weight:700; margin-bottom:0.25rem; }
+  .stat-label { font-size:0.75rem; color:var(--text-dim); }
+  .stat-card.good .stat-val { color:var(--green); }
+  .stat-card.warn .stat-val { color:var(--amber); }
+  .stat-card.bad .stat-val { color:var(--red); }
+
+  .flow-row { display:flex; align-items:center; gap:0.35rem; flex-wrap:wrap; margin:1.5rem 0; font-family:'JetBrains Mono',monospace; font-size:0.7rem; }
+  .flow-station { background:var(--bg-card); border:1px solid var(--border); border-radius:6px; padding:0.4rem 0.7rem; }
+  .flow-station.act { border-color:var(--amber-dim); color:var(--amber); }
+  .flow-station.plan { border-color:var(--cyan-dim); color:var(--cyan); }
+  .flow-station.gate { border-color:var(--red-dim); color:var(--red); }
+  .flow-arr { color:var(--text-muted); }
+
+  .proscons { display:grid; grid-template-columns:1fr 1fr; gap:2rem; margin:2rem 0; }
+  @media(max-width:768px) { .proscons { grid-template-columns:1fr; } }
+  .pc-col { background:var(--bg-surface); border:1px solid var(--border); border-radius:10px; padding:1.5rem; }
+  .pc-col h4 { font-family:'JetBrains Mono',monospace; font-size:0.7rem; letter-spacing:0.25em; text-transform:uppercase; margin-bottom:1rem; padding-bottom:0.75rem; border-bottom:1px solid var(--border); }
+  .pc-col.pros h4 { color:var(--green); } .pc-col.cons h4 { color:var(--red); }
+  .pc-col ul { list-style:none; display:flex; flex-direction:column; gap:0.6rem; }
+  .pc-col li { font-size:0.8rem; padding-left:1.5rem; position:relative; color:var(--text-dim); line-height:1.5; }
+  .pc-col.pros li::before { content:'+'; position:absolute; left:0; color:var(--green); font-weight:700; font-family:'JetBrains Mono',monospace; }
+  .pc-col.cons li::before { content:'\2212'; position:absolute; left:0; color:var(--red); font-weight:700; font-family:'JetBrains Mono',monospace; }
+
+  .phase-list { position:relative; padding-left:3rem; }
+  .phase-list::before { content:''; position:absolute; left:0.75rem; top:0; bottom:0; width:2px; background:linear-gradient(180deg,var(--amber),var(--cyan),var(--purple),var(--green)); }
+  .phase { position:relative; margin-bottom:2.5rem; }
+  .phase-dot { position:absolute; left:-2.55rem; top:0.3rem; width:14px; height:14px; border-radius:50%; border:2px solid; }
+  .phase:nth-child(1) .phase-dot { border-color:var(--amber); background:var(--amber-glow); }
+  .phase:nth-child(2) .phase-dot { border-color:var(--cyan); background:var(--cyan-glow); }
+  .phase:nth-child(3) .phase-dot { border-color:var(--purple); background:rgba(167,139,250,0.15); }
+  .phase:nth-child(4) .phase-dot { border-color:var(--green); background:rgba(127,219,138,0.15); }
+  .phase h4 { font-size:1rem; font-weight:700; margin-bottom:0.3rem; }
+  .phase-desc { font-size:0.85rem; color:var(--text-dim); line-height:1.6; }
+
+  .divider { width:100%; height:1px; background:linear-gradient(90deg,transparent,var(--border-bright),transparent); margin:2rem 0; }
+
+  .code-block { font-family:'JetBrains Mono',monospace; font-size:0.72rem; background:var(--bg-card); border:1px solid var(--border); border-radius:8px; padding:1.25rem; overflow-x:auto; line-height:1.7; color:var(--text-dim); margin:1rem 0; white-space:pre; }
+
+  footer { text-align:center; padding:4rem 2rem; color:var(--text-muted); font-size:0.8rem; border-top:1px solid var(--border); }
+  footer a { color:var(--amber); text-decoration:none; } footer a:hover { text-decoration:underline; }
+</style>
+</head>
+<body>
+
+<!-- ═══ HERO ═══ -->
+<div class="hero">
+  <div class="hero-label">dmora/crucible-pro &middot; architecture &amp; eval</div>
+  <h1>Making One Session<br>Reliable</h1>
+  <p class="hero-sub">Crucible is one agent with station tools. The problem isn't "we need more agents." The problem is making a single Claude Code session do what it's told, with discipline, quality gates, and no shortcuts.</p>
+</div>
+
+<!-- ═══ WHAT CRUCIBLE IS ═══ -->
+<section>
+  <div class="section-label">01</div>
+  <h2 class="section-title">What Crucible Is</h2>
+  <p class="section-desc">One Gemini supervisor with station tools. Each station is an agentrun process — Claude Code, Codex, OpenCode, or any supported CLI backend — scoped to one role. The operator controls what enters the line. One workpiece at a time. Sequential by design.</p>
+
+  <div class="principle">
+    <div class="principle-label">The Problem Being Solved</div>
+    <p>A single agent session (Claude Code, Codex, etc.) can turn intent into working code. But it skips review, doesn't verify, produces verbose output, and can't learn across sessions. Crucible wraps that session with planning discipline, quality gates, and operator control.</p>
+  </div>
+
+  <div class="flow-row">
+    <span class="flow-station plan">design</span><span class="flow-arr">&#9654;</span>
+    <span class="flow-station plan">draft</span><span class="flow-arr">&#9654;</span>
+    <span class="flow-station plan">inspect</span><span class="flow-arr">&#9654;</span>
+    <span class="flow-station act">build</span><span class="flow-arr">&#9654;</span>
+    <span class="flow-station plan">review</span><span class="flow-arr">&#9654;</span>
+    <span class="flow-station act">verify</span><span class="flow-arr">&#9654;</span>
+    <span class="flow-station gate">ship</span>
+  </div>
+
+  <div class="principle cyan">
+    <div class="principle-label">Operator Input Is Critical</div>
+    <p>Crucible's success depends on the quality of the GitHub issue. The operator writes the work order. The supervisor reads it, decomposes it, and dispatches to stations. A clear issue with acceptance criteria produces clean runs. A vague issue produces drift.</p>
+  </div>
+</section>
+
+<!-- ═══ EVAL DATA ═══ -->
+<section>
+  <div class="section-label">02</div>
+  <h2 class="section-title">What the Data Shows</h2>
+  <p class="section-desc">692 station dispatches across 28 sessions, 3 projects (crucible-pro, adk-go, huli). March 2026.</p>
+
+  <div class="stat-grid">
+    <div class="stat-card good"><div class="stat-val">94-96%</div><div class="stat-label">Build station reliability</div></div>
+    <div class="stat-card good"><div class="stat-val">100%</div><div class="stat-label">Verify station reliability</div></div>
+    <div class="stat-card warn"><div class="stat-val">52%</div><div class="stat-label">Quality gates skipped</div></div>
+    <div class="stat-card warn"><div class="stat-val">18%</div><div class="stat-label">Operator correction rate</div></div>
+    <div class="stat-card bad"><div class="stat-val">25%</div><div class="stat-label">Wasted dispatches</div></div>
+    <div class="stat-card good"><div class="stat-val">65%</div><div class="stat-label">Sessions that shipped a PR</div></div>
+  </div>
+
+  <div class="divider"></div>
+
+  <h3 style="margin-bottom:1rem;">Station Reliability</h3>
+  <table>
+    <thead><tr><th>Station</th><th>Dispatches</th><th>Reliability</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td>verify</td><td>73</td><td style="color:var(--green)">98-100%</td><td>Most reliable. Runs tests, reports results.</td></tr>
+      <tr><td>build</td><td>279</td><td style="color:var(--green)">94-96%</td><td>High technical success. Verbose output, sometimes wrong location.</td></tr>
+      <tr><td>review</td><td>55</td><td style="color:var(--amber)">78-95%</td><td>Catches real bugs when it runs. Gets skipped 52% of the time.</td></tr>
+      <tr><td>inspect</td><td>91</td><td style="color:var(--amber)">83-90%</td><td>Occasionally empty or crashes.</td></tr>
+      <tr><td>draft</td><td>108</td><td style="color:var(--amber)">83-86%</td><td>Sometimes empty or missing file path.</td></tr>
+      <tr><td>ship</td><td>72</td><td style="color:var(--red)">26-38%</td><td>Almost all failures are operator DENIED, not station failures.</td></tr>
+    </tbody>
+  </table>
+
+  <div class="divider"></div>
+
+  <h3 style="margin-bottom:1rem;">Top Routing Patterns</h3>
+  <table>
+    <thead><tr><th>Transition</th><th>Count</th><th>What It Means</th></tr></thead>
+    <tbody>
+      <tr><td style="color:var(--red)">build &#8594; build</td><td>143</td><td>Supervisor re-dispatches without quality gate. 21% of all routing.</td></tr>
+      <tr><td style="color:var(--green)">draft &#8594; inspect</td><td>67</td><td>Plan iteration. The discipline loop that works.</td></tr>
+      <tr><td style="color:var(--green)">build &#8594; verify</td><td>62</td><td>Standard exit path.</td></tr>
+      <tr><td style="color:var(--green)">review &#8594; build</td><td>39</td><td>Review finds issues, build fixes them. Quality gate working.</td></tr>
+      <tr><td style="color:var(--red)">ship &#8594; build</td><td>23</td><td>Ship failed or denied, back to build.</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ═══ FIVE PROBLEMS ═══ -->
+<section>
+  <div class="section-label">03</div>
+  <h2 class="section-title">Five Measured Problems</h2>
+
+  <div class="principle red">
+    <div class="principle-label">1. Build &#8594; Build Chains</div>
+    <p>143 transitions (21% of all routing). The supervisor enters reactive loops without quality gates. In huli, 71% of builds had no review after them.</p>
+  </div>
+
+  <div class="principle red">
+    <div class="principle-label">2. Ship Gets Denied 60%+</div>
+    <p>The supervisor tries to ship before the operator is ready. It can tell when code compiles — it can't tell when the operator considers the work complete.</p>
+  </div>
+
+  <div class="principle red">
+    <div class="principle-label">3. Sessions Degrade After ~30 Dispatches</div>
+    <p>51% waste in mega-sessions. The supervisor loses coherence and falls into reactive loops. What should be multiple work orders gets jammed into one session.</p>
+  </div>
+
+  <div class="principle red">
+    <div class="principle-label">4. Supervisor Doesn't Catch Architecture Problems</div>
+    <p>Built tools with raw sqlc when the project uses handler services. Never raised the concern. Executes plans without questioning whether the approach is right.</p>
+  </div>
+
+  <div class="principle green">
+    <div class="principle-label">5. Clean Pipeline Sessions Work Well</div>
+    <p>Bounded tasks with clear issues: 0% waste, full pipeline, PRs shipped. The system works when scope is bounded and the supervisor follows the pipeline.</p>
+  </div>
+</section>
+
+<!-- ═══ WHAT STATIONS CATCH VS MISS ═══ -->
+<section>
+  <div class="section-label">04</div>
+  <h2 class="section-title">What Gets Caught, What Gets Missed</h2>
+
+  <div class="proscons">
+    <div class="pc-col pros">
+      <h4>Stations Catch</h4>
+      <ul>
+        <li>Compilation failures and test regressions (verify)</li>
+        <li>Race conditions, nil panics, missing tests (review)</li>
+        <li>SDK type mismatches, missing error handling (inspect)</li>
+        <li>Wrong file placement, plan deviations (supervisor self-correction)</li>
+      </ul>
+    </div>
+    <div class="pc-col cons">
+      <h4>Stations Miss</h4>
+      <ul>
+        <li>Components built but never wired end-to-end</li>
+        <li>Config state not refreshing after writes</li>
+        <li>Token metadata silently dropped (found by external Codex reviewer)</li>
+        <li>Plugin ordering bugs making features dead at runtime</li>
+        <li>Architectural approach wrong for the codebase (raw sqlc vs handler services)</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="principle">
+    <div class="principle-label">The Real Pipeline</div>
+    <p>Crucible produces draft-quality PRs. The operator merges, tests live, finds integration bugs, and feeds them back as new work orders. External AI reviewers (Codex, Gemini Code Assist) catch code-level bugs from a different model perspective. The operator is the integration test layer.</p>
+  </div>
+
+  <div class="code-block">Crucible:  draft &#8594; inspect &#8594; build &#8594; review &#8594; verify &#8594; ship (PR)
+    &#8595;
+Operator:  merge &#8594; test live &#8594; find integration bugs &#8594; fix or new work order
+    &#8595;
+External:  Codex, Gemini Code Assist catch what both missed</div>
+</section>
+
+<!-- ═══ BOUNDARIES ═══ -->
+<section>
+  <div class="section-label">05</div>
+  <h2 class="section-title">Hard Limits</h2>
+
+  <table>
+    <thead><tr><th>Limit</th><th>Evidence</th></tr></thead>
+    <tbody>
+      <tr><td>One workpiece at a time</td><td>Sequential by design</td></tr>
+      <tr><td>~30 dispatches before coherence degrades</td><td>51% waste above this threshold</td></tr>
+      <tr><td>Cannot enforce its own quality gates</td><td>52% gate skip rate</td></tr>
+      <tr><td>Cannot validate problem diagnosis</td><td>Eval task #8: built wrong solution to misdiagnosed problem</td></tr>
+      <tr><td>Cannot catch integration bugs</td><td>Static analysis only — doesn't run the app</td></tr>
+      <tr><td>Cannot know when operator is ready to ship</td><td>60%+ ship DENIED rate</td></tr>
+      <tr><td>Operator compensates for supervisor</td><td>18% correction rate</td></tr>
+      <tr><td>Success depends on issue quality</td><td>Clear issues = 0% waste. Vague issues = drift.</td></tr>
+    </tbody>
+  </table>
+
+  <div class="proscons">
+    <div class="pc-col pros">
+      <h4>When It's Worth It</h4>
+      <ul>
+        <li>Size S-M task with a clear GitHub issue and acceptance criteria</li>
+        <li>Operator provides a work order and reviews the PR after</li>
+        <li>Project has test coverage (verify needs tests to run)</li>
+        <li>Codebase is well-structured (stations need conventions to follow)</li>
+      </ul>
+    </div>
+    <div class="pc-col cons">
+      <h4>When It's Overhead</h4>
+      <ul>
+        <li>Quick fix a single Claude Code session handles in 2 minutes</li>
+        <li>Exploratory work with no clear deliverable</li>
+        <li>Tasks requiring deep architectural judgment</li>
+        <li>Sessions that would exceed ~30 dispatches (split the work order)</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ WHAT TO FIX ═══ -->
+<section>
+  <div class="section-label">06</div>
+  <h2 class="section-title">What to Fix</h2>
+  <p class="section-desc">Based on measured problems, not theoretical improvements. The data says: enforce the pipeline, improve operator input, keep sessions bounded.</p>
+
+  <div class="phase-list">
+    <div class="phase">
+      <div class="phase-dot"></div>
+      <h4>Enforce the pipeline</h4>
+      <p class="phase-desc">The supervisor skips review 52% of the time. Routes should be enforced, not suggested. Plan-gated dispatch (#37), assembly line routing (#49), circuit breaker (#68). The supervisor can choose which route, but once chosen, every station in that route must run.</p>
+    </div>
+    <div class="phase">
+      <div class="phase-dot"></div>
+      <h4>Improve operator input</h4>
+      <p class="phase-desc">Crucible's success correlates with issue quality. The blueprint artifact (#22) formalizes what a good work order looks like. Clear intent, acceptance criteria, constraints. The gap between "new work order gh#X" and what stations receive is the blueprint's job.</p>
+    </div>
+    <div class="phase">
+      <div class="phase-dot"></div>
+      <h4>Track outcomes</h4>
+      <p class="phase-desc">The line doesn't remember. Outcome tracking (#51) records structured results from every dispatch. Prompt versioning (#52) makes station prompts evolvable. Without data, there's nothing to learn from.</p>
+    </div>
+    <div class="phase">
+      <div class="phase-dot"></div>
+      <h4>Close the feedback loop</h4>
+      <p class="phase-desc">The Gödel loop (#50). Supervisor reads outcome history, proposes prompt changes, A/B tests them. The line gets smarter over time. Requires all three above to be in place first.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ FOOTER ═══ -->
+<footer>
+  <p style="margin-bottom:0.5rem;"><strong style="color:var(--text);">Crucible Pro</strong> &middot; Architecture &amp; Eval &middot; March 2026</p>
+  <p><a href="https://github.com/dmora/crucible-pro/issues">Issues</a> &middot; <a href="https://github.com/users/dmora/projects/5">Project Board</a></p>
+  <p style="margin-top:1rem;font-size:0.7rem;">Based on 692 dispatches, 28 sessions, 3 projects. Station boundaries from Anthropic dogfooding study, METR RCT, and Crucible eval data.</p>
+</footer>
+
+</body>
+</html>
