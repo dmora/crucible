@@ -999,5 +999,120 @@ func TestBuildContinuationPromptReplacementNotice(t *testing.T) {
 	}
 }
 
+func TestFileOpsNotRecordedAtToolStart(t *testing.T) {
+	buf := NewContextBuffer("task")
+	buf.StartTurn()
+	buf.RecordToolStart("Write", `{"file_path":"/plan.md","content":"x"}`)
+	buf.FinalizeTurn(time.Second)
+	if len(buf.turns[0].Files) != 0 {
+		t.Errorf("expected 0 file ops at tool start, got %d", len(buf.turns[0].Files))
+	}
+}
+
+func TestPendingFileOpSurvivesNonFileTool(t *testing.T) {
+	// Regression: RecordToolStart("Read") must not clear a pending Write FileOp.
+	// Sequence: Write → Read → Write result confirms → file should be confirmed.
+	cb := NewContextBuffer("task")
+	cb.StartTurn()
+	cb.RecordToolStart("Write", `{"file_path":"/src/plan.md","content":"the plan"}`)
+	// A Read between the Write start and its confirmation must not clear the pending op.
+	cb.RecordToolStart("Read", `{"file_path":"/src/other.go"}`)
+	cb.ConfirmPendingFileOp("Write")
+	cb.FinalizeTurn(time.Second)
+
+	if len(cb.turns[0].Files) != 1 {
+		t.Fatalf("expected 1 confirmed file op, got %d", len(cb.turns[0].Files))
+	}
+	f := cb.turns[0].Files[0]
+	if f.Path != "/src/plan.md" || f.Op != fileOpWrite {
+		t.Errorf("expected Write to /src/plan.md, got %s to %s", f.Op, f.Path)
+	}
+}
+
+func TestReadResultDoesNotConfirmPendingWrite(t *testing.T) {
+	// HIGH: A Read result must not confirm a pending Write.
+	// Sequence: Write start → Read start → Read result (confirm) → Write result (confirm).
+	cb := NewContextBuffer("task")
+	cb.StartTurn()
+	cb.RecordToolStart("Write", `{"file_path":"/src/plan.md","content":"x"}`)
+	cb.RecordToolStart("Read", `{"file_path":"/src/other.go"}`)
+
+	// Read result arrives — must NOT confirm the pending Write.
+	cb.ConfirmPendingFileOp("Read")
+	if len(cb.current.Files) != 0 {
+		t.Fatal("Read result must not confirm pending Write")
+	}
+
+	// Write result arrives — confirms the pending op.
+	cb.ConfirmPendingFileOp("Write")
+	cb.FinalizeTurn(time.Second)
+
+	if len(cb.turns[0].Files) != 1 {
+		t.Fatalf("expected 1 file op, got %d", len(cb.turns[0].Files))
+	}
+	if cb.turns[0].Files[0].Path != "/src/plan.md" {
+		t.Errorf("wrong path: %s", cb.turns[0].Files[0].Path)
+	}
+}
+
+func TestReadErrorDoesNotClearPendingWrite(t *testing.T) {
+	// A Read error must not clear a pending Write.
+	cb := NewContextBuffer("task")
+	cb.StartTurn()
+	cb.RecordToolStart("Write", `{"file_path":"/src/plan.md","content":"x"}`)
+	cb.RecordToolStart("Read", `{"file_path":"/nonexistent"}`)
+
+	// Read fails — must NOT clear the pending Write.
+	cb.ClearPendingFileOp("Read")
+	// Write succeeds.
+	cb.ConfirmPendingFileOp("Write")
+	cb.FinalizeTurn(time.Second)
+
+	if len(cb.turns[0].Files) != 1 {
+		t.Fatalf("expected 1 file op, got %d", len(cb.turns[0].Files))
+	}
+}
+
+func TestMessageErrorDoesNotClearPendingWrite(t *testing.T) {
+	// Simulates the handler's MessageError path: an infrastructure error
+	// (e.g., parse failure) must not wipe a pending Write. The pending op
+	// survives and is confirmed when the Write result eventually arrives.
+	// Sequence: Write start → Read start → MessageError → Write success.
+	cb := NewContextBuffer("task")
+	cb.StartTurn()
+	cb.RecordToolStart("Write", `{"file_path":"/src/plan.md","content":"x"}`)
+	cb.RecordToolStart("Read", `{"file_path":"/src/other.go"}`)
+
+	// MessageError arrives — handler just records it, no ClearPendingFileOp.
+	cb.RecordError("acp: malformed JSON from agent")
+
+	// Write result arrives and confirms the pending op.
+	cb.ConfirmPendingFileOp("Write")
+	cb.FinalizeTurn(time.Second)
+
+	if len(cb.turns[0].Files) != 1 {
+		t.Fatalf("expected 1 file op, got %d", len(cb.turns[0].Files))
+	}
+	if cb.turns[0].Files[0].Path != "/src/plan.md" {
+		t.Errorf("wrong path: %s", cb.turns[0].Files[0].Path)
+	}
+}
+
+func TestPendingFileOpPathKey(t *testing.T) {
+	// MEDIUM: Tools using "path" instead of "file_path" should still set pending op.
+	cb := NewContextBuffer("task")
+	cb.StartTurn()
+	cb.RecordToolStart("write_file", `{"path":"/src/output.go","content":"x"}`)
+	cb.ConfirmPendingFileOp("write_file")
+	cb.FinalizeTurn(time.Second)
+
+	if len(cb.turns[0].Files) != 1 {
+		t.Fatalf("expected 1 file op, got %d", len(cb.turns[0].Files))
+	}
+	if cb.turns[0].Files[0].Path != "/src/output.go" {
+		t.Errorf("wrong path: %s", cb.turns[0].Files[0].Path)
+	}
+}
+
 // errors is needed for errTest.
 var _ = errors.New

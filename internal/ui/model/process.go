@@ -212,7 +212,7 @@ func renderRunningDispatch(
 		opState := chat.DeriveOperatorState(
 			info.Activity, info.Phase,
 			chat.ToolStatusRunning,
-			false,
+			false, info.IsRelayDriven,
 		)
 		if opState != agent.OpStateIdle {
 			description = t.ResourceStatus.Render(string(opState))
@@ -310,57 +310,67 @@ func (m *UI) updateStationActivity() {
 	}
 }
 
-// syncStationItem updates a single chat item if it's an active station tool.
+// syncStationItem updates a single chat item if it's an active station tool or relay turn.
 func syncStationItem(item chat.MessageItem, infos map[string]agent.ProcessInfo, wtBranch string) {
 	if item == nil {
 		return
 	}
-	st, ok := item.(*chat.StationToolMessageItem)
+
+	// Set worktree branch on station tool items (relay items don't need it).
+	if st, ok := item.(*chat.StationToolMessageItem); ok && wtBranch != "" {
+		st.SetBranch(wtBranch)
+	}
+
+	// Use LiveStationItem interface for activity updates (both station and relay items).
+	live, ok := item.(chat.LiveStationItem)
 	if !ok {
 		return
 	}
-	if wtBranch != "" {
-		st.SetBranch(wtBranch)
-	}
-	if st.HasResult() || st.Status() == chat.ToolStatusSuccess || st.Status() == chat.ToolStatusError || st.Status() == chat.ToolStatusCanceled {
+	if live.HasResult() || live.Status() == chat.ToolStatusSuccess ||
+		live.Status() == chat.ToolStatusError || live.Status() == chat.ToolStatusCanceled {
 		return
 	}
-	if info, ok := infos[st.ToolCall().Name]; ok {
-		st.SetActivity(info.Activity, info.Phase, info.StartedAt)
+	if info, ok := infos[live.StationName()]; ok {
+		live.SetActivity(info.Activity, info.Phase, info.StartedAt)
 	}
 }
 
-// walkActiveStations iterates active station cards from tail to head,
-// calling fn for each station that has not completed, failed, or been canceled.
-// Walks from the tail — active stations are always near the end.
-func (m *UI) walkActiveStations(fn func(*chat.StationToolMessageItem)) {
+// liveStationStepper is the subset of LiveStationItem that supports animation.
+type liveStationStepper interface {
+	chat.LiveStationItem
+	StepOnce()
+	InvalidateCache()
+}
+
+// walkActiveLiveItems iterates active station/relay cards from tail to head,
+// calling fn for each item that has not completed, failed, or been canceled.
+func (m *UI) walkActiveLiveItems(fn func(liveStationStepper)) {
 	for i := m.chat.Len() - 1; i >= 0; i-- {
-		st, ok := m.chat.ItemAt(i).(*chat.StationToolMessageItem)
+		item, ok := m.chat.ItemAt(i).(liveStationStepper)
 		if !ok {
 			continue
 		}
-		if st.HasResult() || st.Status() == chat.ToolStatusSuccess ||
-			st.Status() == chat.ToolStatusError || st.Status() == chat.ToolStatusCanceled {
+		if item.HasResult() || item.Status() == chat.ToolStatusSuccess ||
+			item.Status() == chat.ToolStatusError || item.Status() == chat.ToolStatusCanceled {
 			continue
 		}
-		fn(st)
+		fn(item)
 	}
 }
 
 // stepActiveStationSpinners advances the spinner one frame on all active
-// station cards. Called on agent events so the spinner moves with work rhythm.
+// station/relay cards. Called on agent events so the spinner moves with work rhythm.
 func (m *UI) stepActiveStationSpinners() {
-	m.walkActiveStations(func(st *chat.StationToolMessageItem) {
-		st.StepOnce()
+	m.walkActiveLiveItems(func(item liveStationStepper) {
+		item.StepOnce()
 	})
 }
 
-// invalidateActiveStationCaches clears the render cache on all active station
+// invalidateActiveStationCaches clears the render cache on all active station/relay
 // cards so elapsed time and status chip refresh on the next draw.
-// Called on a 1-second timer tick — does NOT advance spinners.
 func (m *UI) invalidateActiveStationCaches() {
-	m.walkActiveStations(func(st *chat.StationToolMessageItem) {
-		st.InvalidateCache()
+	m.walkActiveLiveItems(func(item liveStationStepper) {
+		item.InvalidateCache()
 	})
 }
 

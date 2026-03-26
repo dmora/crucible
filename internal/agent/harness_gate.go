@@ -27,14 +27,26 @@ func (gc *GateController) effectiveCWD(sessionID string) string {
 // Check returns (approved, error). sessionID is required for the
 // permission request. Composes the per-station gate bool with the
 // runtime hold flag, then delegates to checkGate().
-func (gc *GateController) Check(ctx context.Context, sessionID, functionCallID, task string, holdFlag *atomic.Bool, perms permission.Service) (bool, error) {
+func (gc *GateController) Check(ctx context.Context, sessionID, functionCallID string, input stationInput, holdFlag *atomic.Bool, perms permission.Service) (bool, error) {
 	return checkGate(ctx, permission.CreatePermissionRequest{
 		SessionID:   sessionID,
 		ToolCallID:  functionCallID,
 		ToolName:    "gate:" + gc.station,
-		Description: fmt.Sprintf("Station %q requests approval to execute", gc.station),
+		Description: fmt.Sprintf("%q requests approval to execute", gc.station),
 		Action:      "execute",
-		Params:      map[string]string{"task": task},
+		Params:      buildGateParams(input),
 		Path:        gc.effectiveCWD(sessionID),
 	}, gc.gated, holdFlag, perms)
+}
+
+// buildGateParams converts stationInput to a map for the gate permission
+// request. Only includes non-empty structured fields.
+func buildGateParams(input stationInput) map[string]any {
+	params := map[string]any{"task": input.Task, "task_description": input.TaskDescription}
+	for _, f := range input.structuredFields() {
+		if len(f.Items) > 0 {
+			params[f.Key] = f.Items
+		}
+	}
+	return params
 }

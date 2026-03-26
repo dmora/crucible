@@ -390,9 +390,11 @@ func (c *Commands) defaultCommands() []*CommandItem {
 		NewCommandItem(c.com.Styles, "new_session", "New Session", "ctrl+n", ActionNewSession{}),
 		NewCommandItem(c.com.Styles, "switch_session", "Sessions", "ctrl+s", ActionOpenDialog{SessionsID}),
 		NewCommandItem(c.com.Styles, "switch_model", "Switch Model", "ctrl+l", ActionOpenDialog{ModelsID}),
+		NewCommandItem(c.com.Styles, "switch_auth", "Switch Auth", "", ActionOpenDialog{AuthID}),
 		NewCommandItem(c.com.Styles, "view_artifacts", "View Artifacts", "ctrl+a", ActionOpenDialog{ArtifactsID}),
 		NewCommandItem(c.com.Styles, "factory_status", "Factory Status", "", ActionShowFactoryStatus{}),
 		NewCommandItem(c.com.Styles, "equipment", "Equipment", "ctrl+e", ActionShowEquipment{}),
+		NewCommandItem(c.com.Styles, "stations", "Stations", "", ActionOpenDialog{StationsID}),
 	}
 
 	// Only show compact command if there's an active session
@@ -468,6 +470,7 @@ func (c *Commands) defaultCommands() []*CommandItem {
 		}),
 		NewCommandItem(c.com.Styles, "toggle_yolo", "Toggle Yolo Mode", "", ActionToggleYoloMode{}),
 		NewCommandItem(c.com.Styles, "toggle_hold", "Toggle Hold", "ctrl+h", ActionToggleHold{}),
+		NewCommandItem(c.com.Styles, "skip_plan", "Skip Plan Enforcement", "", ActionSkipPlan{}),
 		NewCommandItem(c.com.Styles, "toggle_help", "Toggle Help", "ctrl+g", ActionToggleHelp{}),
 		NewCommandItem(c.com.Styles, "init", "Re-initialize Project", "", ActionInitializeProject{}),
 		NewCommandItem(c.com.Styles, "quit", "Quit", "ctrl+c", tea.QuitMsg{}),

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -36,19 +37,22 @@ type RecoveryController struct {
 
 // Run executes the station with context exhaustion recovery.
 // handler receives the raw message stream for UI observation.
-// Returns (resultIsError, error).
+// Returns (resultIsError, artifactPath, error). artifactPath is the last
+// confirmed .md file written by the station (empty if none).
 func (rc *RecoveryController) Run(
 	ctx context.Context,
 	tctx tool.Context,
 	ops ProcessOps,
 	sessionID string,
-	task string,
+	input stationInput,
 	taskBuilder *TaskBuilder,
+	artifactContext string, // plan path injection — per-invocation, not stored on TaskBuilder
 	result *strings.Builder,
 	handler func(agentrun.Message) error,
 	notifier *notify.Notifier,
 	ledger *UsageLedger,
-) (resultIsError bool, err error) {
+) (resultIsError bool, artifactPath string, err error) {
+	task := FormatDispatch(input)
 	buf := NewContextBuffer(task)
 
 	var resumeID string
@@ -59,16 +63,25 @@ func (rc *RecoveryController) Run(
 	}
 
 	for range maxGenerations + 1 {
+		// Gen 0 uses the original structured input so Build sees all fields.
+		// Gen > 0 uses a task-only input (continuation prompt is a plain string).
+		var turnInput stationInput
+		if buf.Generation() == 0 {
+			turnInput = input
+		} else {
+			turnInput = stationInput{Task: task}
+		}
+
 		// Streaming gen > 0: empty initialPrompt — CLI starts waiting,
 		// full prompt delivered via Send() in RunTurn.
 		// Spawn-per-turn gen > 0: prompt baked into Start() CLI args.
 		var initialPrompt string
 		if buf.Generation() == 0 || taskBuilder.IsSpawnPerTurn() {
-			initialPrompt = taskBuilder.Build(task, true)
+			initialPrompt = taskBuilder.Build(turnInput, true, artifactContext)
 		}
 		proc, firstTurn, err := ops.GetOrStart(ctx, sessionID, initialPrompt, resumeID)
 		if err != nil {
-			return false, err
+			return false, "", err
 		}
 
 		if gen := buf.Generation(); gen > 0 {
@@ -80,9 +93,9 @@ func (rc *RecoveryController) Run(
 
 		var turnTask string
 		if buf.Generation() == 0 {
-			turnTask = taskBuilder.Build(task, firstTurn)
+			turnTask = taskBuilder.Build(turnInput, firstTurn, artifactContext)
 		} else if firstTurn {
-			turnTask = taskBuilder.Build(task, true)
+			turnTask = taskBuilder.Build(turnInput, true, artifactContext)
 		}
 
 		buf.StartTurn()
@@ -116,7 +129,7 @@ func (rc *RecoveryController) Run(
 			// Spawn-per-turn processes exit after one turn — just remove from
 			// pool without killing UI state (KillProcess calls removeProcessState).
 			ops.RemoveFromPool(sessionID)
-			return resultIsError, turnErr
+			return resultIsError, buf.LastWrittenMD(), turnErr
 		}
 
 		if lastContextUsed == 0 {
@@ -140,13 +153,13 @@ func (rc *RecoveryController) Run(
 			"turns", len(buf.turns))
 
 		if !shouldReplace {
-			return resultIsError, turnErr
+			return resultIsError, buf.LastWrittenMD(), turnErr
 		}
 
 		if buf.AtGenerationCap() {
 			result.WriteString("\n\n[WARNING: Station reached maximum replacement limit. Result may be incomplete.]")
 			ops.KillProcess(ctx, sessionID)
-			return resultIsError, turnErr
+			return resultIsError, buf.LastWrittenMD(), turnErr
 		}
 
 		slog.Info("Station replaced",
@@ -192,7 +205,140 @@ func (rc *RecoveryController) Run(
 		resumeID = ""
 	}
 
-	return false, fmt.Errorf("station %q: exceeded max replacement iterations", rc.station)
+	return false, "", fmt.Errorf("station %q: exceeded max replacement iterations", rc.station)
+}
+
+// RunDirect executes a relay turn through the full recovery pipeline.
+// Unlike Run(), it does not depend on tool.Context (no ADK tool call in relay).
+// The operator's message goes verbatim — no TaskBuilder/skill wrapping.
+func (rc *RecoveryController) RunDirect(
+	ctx context.Context,
+	ops ProcessOps,
+	sessionID string,
+	message string,
+	result *strings.Builder,
+	handler func(agentrun.Message) error,
+	ledger *UsageLedger,
+	resumeID string,
+	onResumeID func(string),
+) (resultIsError bool, artifactPath string, err error) {
+	task := message
+	buf := NewContextBuffer(task)
+
+	for range maxGenerations + 1 {
+		// Relay path: raw message, no skill wrapping.
+		// Gen 0 uses the operator's message; gen > 0 uses the continuation prompt.
+		var initialPrompt string
+		if buf.Generation() == 0 {
+			initialPrompt = task
+		}
+
+		proc, firstTurn, err := ops.GetOrStart(ctx, sessionID, initialPrompt, resumeID)
+		if err != nil {
+			return false, "", err
+		}
+
+		if gen := buf.Generation(); gen > 0 {
+			if info, ok := processStates.Get(processStateKey(sessionID, rc.station)); ok {
+				info.Generation = gen
+				updateProcessState(processStateKey(sessionID, rc.station), info)
+			}
+		}
+
+		// For relay: always send the task. On streaming first turn, the
+		// message is also baked into GetOrStart CLI args — the double-send
+		// matches Run()'s behavior and both backends handle it correctly.
+		turnTask := task
+
+		buf.StartTurn()
+		ops.ClearActivity(sessionID)
+
+		var lastStopReason agentrun.StopReason
+		var lastContextUsed, lastContextSize int
+		turnStart := time.Now()
+
+		wrappedHandler := rc.buildWrappedHandler(
+			buf, result, handler,
+			&lastStopReason, &lastContextUsed, &lastContextSize,
+			&resultIsError, ledger,
+		)
+
+		var turnErr error
+		_, spawnPerTurn := proc.(agentrun.SequentialSender)
+		if firstTurn && spawnPerTurn {
+			slog.Debug("S1 relay turn path: drain-only (spawn-per-turn first turn)",
+				"station", rc.station, "generation", buf.Generation())
+			turnErr = drainFirstTurn(ctx, proc, wrappedHandler)
+		} else {
+			slog.Debug("S1 relay turn path: RunTurn",
+				"station", rc.station, "generation", buf.Generation(),
+				"first_turn", firstTurn)
+			turnErr = agentrun.RunTurn(ctx, proc, turnTask, wrappedHandler)
+		}
+		buf.FinalizeTurn(time.Since(turnStart))
+
+		if spawnPerTurn {
+			ops.RemoveFromPool(sessionID)
+			return resultIsError, buf.LastWrittenMD(), turnErr
+		}
+
+		if lastContextUsed == 0 {
+			if info, ok := processStates.Get(processStateKey(sessionID, rc.station)); ok {
+				lastContextUsed = info.ContextUsed
+				lastContextSize = info.ContextSize
+			}
+		}
+
+		shouldReplace, reason := buf.ShouldReplace(lastStopReason, turnErr, lastContextUsed, lastContextSize)
+
+		slog.Debug("S1 relay exhaustion check",
+			"station", rc.station, "session", sessionID,
+			"should_replace", shouldReplace, "reason", reason,
+			"generation", buf.Generation())
+
+		if !shouldReplace {
+			// Report latest resume ID back to relay controller.
+			if onResumeID != nil {
+				if info, ok := processStates.Get(processStateKey(sessionID, rc.station)); ok && info.ResumeID != "" {
+					onResumeID(info.ResumeID)
+				}
+			}
+			return resultIsError, buf.LastWrittenMD(), turnErr
+		}
+
+		if buf.AtGenerationCap() {
+			result.WriteString("\n\n[WARNING: Station reached maximum replacement limit. Result may be incomplete.]")
+			ops.KillProcess(ctx, sessionID)
+			return resultIsError, buf.LastWrittenMD(), turnErr
+		}
+
+		slog.Info("Relay station replaced",
+			"station", rc.station, "session", sessionID,
+			"generation", buf.Generation()+1, "trigger", reason)
+
+		publishReplacementActivity(processStateKey(sessionID, rc.station), sessionID, rc.station, reason)
+		ops.KillProcess(ctx, sessionID)
+
+		captureFn := rc.captureRepoStateFn
+		if captureFn == nil {
+			captureFn = captureRepoState
+		}
+		effectiveCWD := rc.cwd
+		if rc.cwdResolver != nil {
+			effectiveCWD = rc.cwdResolver(sessionID)
+		}
+		repoState, _ := captureFn(ctx, effectiveCWD)
+		buf.SetRepoState(repoState)
+
+		buf.IncrementGeneration()
+		result.Reset()
+		resultIsError = false
+
+		task = buf.BuildContinuationPrompt()
+		resumeID = ""
+	}
+
+	return false, "", fmt.Errorf("station %q: exceeded max relay replacement iterations", rc.station)
 }
 
 // buildWrappedHandler creates a handler that records to ContextBuffer
@@ -224,16 +370,43 @@ func (rc *RecoveryController) buildWrappedHandler(
 				buf.AppendResult(msg.Content)
 				result.WriteString(msg.Content)
 			}
+		case agentrun.MessageToolUse:
+			// ACP backends emit MessageToolUse instead of MessageText+Tool.
+			if msg.Tool != nil {
+				buf.RecordToolStart(msg.Tool.Name, string(msg.Tool.Input))
+			}
 		case agentrun.MessageThinking:
 			buf.RecordThinking(msg.Content)
 		case agentrun.MessageToolResult:
 			buf.RecordToolOutput(msg.Content)
+			// Confirm or clear the pending FileOp based on tool success.
+			// Pass the completing tool's name so non-file tools (Read, Bash)
+			// don't incorrectly confirm/clear a pending Write/Edit.
+			toolName := ""
+			if msg.Tool != nil {
+				toolName = msg.Tool.Name
+			}
+			if isToolResultError(msg.Raw) {
+				buf.ClearPendingFileOp(toolName)
+			} else {
+				buf.ConfirmPendingFileOp(toolName)
+			}
 		case agentrun.MessageError:
+			// Do not clear pendingFileOp here. MessageError is infrastructure-
+			// level (parse failures, permission panics), not a tool result.
+			// Tool failures route through MessageToolResult where correlation
+			// prevents non-file tools from clearing a pending Write/Edit.
+			// Any dangling pending op expires harmlessly at FinalizeTurn.
 			buf.RecordError(msg.Content)
 		case agentrun.MessageResult:
 			*lastStopReason = msg.StopReason
 			if msg.IsError {
 				*resultIsError = true
+			} else {
+				// Confirm any pending FileOp on successful turn completion.
+				// Claude CLI may not emit a separate MessageToolResult for
+				// Write tools — the turn ends directly after the write.
+				buf.ConfirmPendingFileOp("")
 			}
 			if msg.Content != "" && result.Len() == 0 {
 				buf.AppendResult(msg.Content)
@@ -260,4 +433,21 @@ func (rc *RecoveryController) buildWrappedHandler(
 		}
 		return handler(msg)
 	}
+}
+
+// isToolResultError probes the raw JSON of a tool result for explicit error
+// indicators. Defense-in-depth: MessageToolResult already implies success
+// (failures emit MessageError), but some backends may surface errors inline.
+func isToolResultError(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var probe struct {
+		IsError bool   `json:"is_error"`
+		Status  string `json:"status"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return false
+	}
+	return probe.IsError || probe.Status == "error"
 }

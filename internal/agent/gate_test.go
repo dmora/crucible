@@ -238,7 +238,7 @@ func TestCheckGate_RequestFields(t *testing.T) {
 		ToolName:    "gate:review",
 		Description: `Station "review" requests approval to execute`,
 		Action:      "execute",
-		Params:      map[string]string{"task": "review the code"},
+		Params:      map[string]any{"task": "review the code"},
 		Path:        "/tmp/project",
 	}
 
@@ -250,4 +250,41 @@ func TestCheckGate_RequestFields(t *testing.T) {
 	require.Equal(t, "execute", mock.lastRequest.Action)
 	require.Equal(t, "sess-123", mock.lastRequest.SessionID)
 	require.Equal(t, "/tmp/project", mock.lastRequest.Path)
+}
+
+func TestBuildGateParams_TaskOnly(t *testing.T) {
+	t.Parallel()
+	got := buildGateParams(stationInput{Task: "review"})
+	require.Equal(t, "review", got["task"])
+	require.Equal(t, "", got["task_description"])
+}
+
+func TestBuildGateParams_EmptySlices(t *testing.T) {
+	t.Parallel()
+	got := buildGateParams(stationInput{
+		Task:         "review",
+		ContextHints: []string{},
+	})
+	require.Equal(t, "review", got["task"],
+		"task should always be present")
+	require.Nil(t, got["context_hints"],
+		"empty slices should not appear in gate params")
+}
+
+func TestBuildGateParams_AllFields(t *testing.T) {
+	t.Parallel()
+	input := stationInput{
+		Task:            "build auth",
+		TaskDescription: "Add JWT auth to the API",
+		ContextHints:    []string{"see plans/auth.md"},
+		Constraints:     []string{"no new deps"},
+		SuccessCriteria: []string{"all tests pass"},
+	}
+	got := buildGateParams(input)
+
+	require.Equal(t, "build auth", got["task"])
+	require.Equal(t, "Add JWT auth to the API", got["task_description"])
+	require.Equal(t, []string{"see plans/auth.md"}, got["context_hints"])
+	require.Equal(t, []string{"no new deps"}, got["constraints"])
+	require.Equal(t, []string{"all tests pass"}, got["success_criteria"])
 }

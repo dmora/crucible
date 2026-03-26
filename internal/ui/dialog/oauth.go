@@ -1,7 +1,6 @@
 package dialog
 
 import (
-	"context"
 	"fmt"
 	"strings"
 
@@ -18,14 +17,15 @@ import (
 	"github.com/pkg/browser"
 )
 
+// OAuthProvider is the interface for OAuth providers used by the dialog.
 type OAuthProvider interface {
 	name() string
 	initiateAuth() tea.Msg
-	startPolling(deviceCode string, expiresIn int) tea.Cmd
-	stopPolling() tea.Msg
+	awaitCallback(expiresIn int) tea.Cmd
+	cancel() tea.Msg
 }
 
-// OAuthState represents the current state of the device flow.
+// OAuthState represents the current state of the OAuth flow.
 type OAuthState int
 
 const (
@@ -35,7 +35,7 @@ const (
 	OAuthStateError
 )
 
-// OAuthID is the identifier for the model selection dialog.
+// OAuthID is the identifier for the OAuth dialog.
 const OAuthID = "oauth"
 
 // OAuth handles the OAuth flow authentication.
@@ -53,24 +53,19 @@ type OAuth struct {
 	spinner spinner.Model
 	help    help.Model
 	keyMap  struct {
-		Copy   key.Binding
 		Submit key.Binding
 		Close  key.Binding
 	}
 
-	width           int
-	deviceCode      string
-	userCode        string
-	verificationURL string
-	expiresIn       int
-	interval        int
-	token           *oauth.Token
-	cancelFunc      context.CancelFunc
+	width     int
+	authURL   string // for fallback "open manually" link
+	expiresIn int
+	token     *oauth.Token
 }
 
 var _ Dialog = (*OAuth)(nil)
 
-// newOAuth creates a new device flow component.
+// newOAuth creates a new OAuth dialog component.
 func newOAuth(
 	com *common.Common,
 	isOnboarding bool,
@@ -99,13 +94,9 @@ func newOAuth(
 	m.help = help.New()
 	m.help.Styles = t.DialogHelpStyles()
 
-	m.keyMap.Copy = key.NewBinding(
-		key.WithKeys("c"),
-		key.WithHelp("c", "copy code"),
-	)
 	m.keyMap.Submit = key.NewBinding(
 		key.WithKeys("enter", "ctrl+y"),
-		key.WithHelp("enter", "copy & open"),
+		key.WithHelp("enter", "finish"),
 	)
 	m.keyMap.Close = CloseKey
 
@@ -131,54 +122,56 @@ func (m *OAuth) HandleMsg(msg tea.Msg) Action {
 		}
 
 	case tea.KeyPressMsg:
-		switch {
-		case key.Matches(msg, m.keyMap.Copy):
-			cmd := m.copyCode()
-			return ActionCmd{cmd}
-
-		case key.Matches(msg, m.keyMap.Submit):
-			switch m.State {
-			case OAuthStateSuccess:
-				return m.saveKeyAndContinue()
-
-			default:
-				cmd := m.copyCodeAndOpenURL()
-				return ActionCmd{cmd}
-			}
-
-		case key.Matches(msg, m.keyMap.Close):
-			switch m.State {
-			case OAuthStateSuccess:
-				return m.saveKeyAndContinue()
-
-			default:
-				return ActionClose{}
-			}
-		}
+		return m.handleKeyPress(msg)
 
 	case ActionInitiateOAuth:
-		m.deviceCode = msg.DeviceCode
-		m.userCode = msg.UserCode
-		m.expiresIn = msg.ExpiresIn
-		m.verificationURL = msg.VerificationURL
-		m.interval = msg.Interval
+		m.authURL = msg.AuthURL
+		m.expiresIn = 300 // 5 minute timeout for callback
 		m.State = OAuthStateDisplay
-		return ActionCmd{m.oAuthProvider.startPolling(msg.DeviceCode, msg.ExpiresIn)}
+		// Auto-open browser and start waiting for callback
+		return ActionCmd{tea.Batch(
+			func() tea.Msg {
+				if err := browser.OpenURL(msg.AuthURL); err != nil {
+					return ActionOAuthErrored{Error: fmt.Errorf("open browser: %w", err)}
+				}
+				return nil
+			},
+			m.oAuthProvider.awaitCallback(300),
+		)}
 
 	case ActionCompleteOAuth:
 		m.State = OAuthStateSuccess
 		m.token = msg.Token
-		return ActionCmd{m.oAuthProvider.stopPolling}
+		return ActionCmd{m.oAuthProvider.cancel}
 
 	case ActionOAuthErrored:
 		m.State = OAuthStateError
-		cmd := tea.Batch(m.oAuthProvider.stopPolling, util.ReportError(msg.Error))
+		cmd := tea.Batch(m.oAuthProvider.cancel, util.ReportError(msg.Error))
 		return ActionCmd{cmd}
 	}
 	return nil
 }
 
-// View renders the device flow dialog.
+func (m *OAuth) handleKeyPress(msg tea.KeyPressMsg) Action {
+	switch {
+	case key.Matches(msg, m.keyMap.Submit):
+		if m.State == OAuthStateSuccess {
+			return m.saveKeyAndContinue()
+		}
+
+	case key.Matches(msg, m.keyMap.Close):
+		if m.State == OAuthStateSuccess {
+			return m.saveKeyAndContinue()
+		}
+		// Synchronously tear down listener + server, then close dialog.
+		// cancel() is non-blocking (mutex-guarded Close, not Shutdown).
+		m.oAuthProvider.cancel()
+		return ActionClose{}
+	}
+	return nil
+}
+
+// Draw renders the OAuth dialog.
 func (m *OAuth) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 	var (
 		t           = m.com.Styles
@@ -231,13 +224,12 @@ func (m *OAuth) headerContent() string {
 
 func (m *OAuth) innerDialogContent() string {
 	var (
-		t            = m.com.Styles
-		whiteStyle   = lipgloss.NewStyle().Foreground(t.White)
-		primaryStyle = lipgloss.NewStyle().Foreground(t.Primary)
-		greenStyle   = lipgloss.NewStyle().Foreground(t.GreenLight)
-		linkStyle    = lipgloss.NewStyle().Foreground(t.GreenDark).Underline(true)
-		errorStyle   = lipgloss.NewStyle().Foreground(t.Error)
-		mutedStyle   = lipgloss.NewStyle().Foreground(t.FgMuted)
+		t          = m.com.Styles
+		whiteStyle = lipgloss.NewStyle().Foreground(t.White)
+		greenStyle = lipgloss.NewStyle().Foreground(t.GreenLight)
+		linkStyle  = lipgloss.NewStyle().Foreground(t.GreenDark).Underline(true)
+		errorStyle = lipgloss.NewStyle().Foreground(t.Error)
+		mutedStyle = lipgloss.NewStyle().Foreground(t.FgMuted)
 	)
 
 	switch m.State {
@@ -256,43 +248,26 @@ func (m *OAuth) innerDialogContent() string {
 			Margin(0, 1).
 			Width(m.width - 2).
 			Render(
-				whiteStyle.Render("Press ") +
-					primaryStyle.Render("enter") +
-					whiteStyle.Render(" to copy the code below and open the browser."),
+				whiteStyle.Render("Sign in with your Google account in the browser."),
 			)
 
-		codeBox := lipgloss.NewStyle().
-			Width(m.width-2).
-			Height(7).
-			Align(lipgloss.Center, lipgloss.Center).
-			Background(t.BgBaseLighter).
-			Margin(0, 1).
-			Render(
-				lipgloss.NewStyle().
-					Bold(true).
-					Foreground(t.White).
-					Render(m.userCode),
-			)
-
-		link := linkStyle.Hyperlink(m.verificationURL, "id=oauth-verify").Render(m.verificationURL)
+		link := linkStyle.Hyperlink(m.authURL, "id=oauth-verify").Render(m.authURL)
 		url := mutedStyle.
 			Margin(0, 1).
 			Width(m.width - 2).
-			Render("Browser not opening? Refer to\n" + link)
+			Render("Browser not opening? Open this link:\n" + link)
 
 		waiting := lipgloss.NewStyle().
 			Margin(0, 1).
 			Width(m.width - 2).
 			Render(
-				greenStyle.Render(m.spinner.View()) + mutedStyle.Render("Verifying..."),
+				greenStyle.Render(m.spinner.View()) + mutedStyle.Render("Waiting for sign-in..."),
 			)
 
 		return lipgloss.JoinVertical(
 			lipgloss.Left,
 			"",
 			instructions,
-			"",
-			codeBox,
 			"",
 			url,
 			"",
@@ -322,7 +297,7 @@ func (m *OAuth) FullHelp() [][]key.Binding {
 	return [][]key.Binding{m.ShortHelp()}
 }
 
-// ShortHelp returns the full help view.
+// ShortHelp returns the short help view.
 func (m *OAuth) ShortHelp() []key.Binding {
 	switch m.State {
 	case OAuthStateError:
@@ -331,57 +306,37 @@ func (m *OAuth) ShortHelp() []key.Binding {
 	case OAuthStateSuccess:
 		return []key.Binding{
 			key.NewBinding(
-				key.WithKeys("finish", "ctrl+y", "esc"),
+				key.WithKeys("enter", "ctrl+y", "esc"),
 				key.WithHelp("enter", "finish"),
 			),
 		}
 
 	default:
-		return []key.Binding{
-			m.keyMap.Copy,
-			m.keyMap.Submit,
-			m.keyMap.Close,
-		}
+		return []key.Binding{m.keyMap.Close}
 	}
-}
-
-func (d *OAuth) copyCode() tea.Cmd {
-	if d.State != OAuthStateDisplay {
-		return nil
-	}
-	return tea.Sequence(
-		tea.SetClipboard(d.userCode),
-		util.ReportInfo("Code copied to clipboard"),
-	)
-}
-
-func (d *OAuth) copyCodeAndOpenURL() tea.Cmd {
-	if d.State != OAuthStateDisplay {
-		return nil
-	}
-	return tea.Sequence(
-		tea.SetClipboard(d.userCode),
-		func() tea.Msg {
-			if err := browser.OpenURL(d.verificationURL); err != nil {
-				return ActionOAuthErrored{fmt.Errorf("failed to open browser: %w", err)}
-			}
-			return nil
-		},
-		util.ReportInfo("Code copied and URL opened"),
-	)
 }
 
 func (m *OAuth) saveKeyAndContinue() Action {
-	cfg := m.com.Config()
-
-	err := cfg.SetProviderAPIKey(m.provider.ID, m.token)
-	if err != nil {
-		return ActionCmd{util.ReportError(fmt.Errorf("failed to save API key: %w", err))}
+	return ActionCredentialReady{
+		ProviderID: m.provider.ID,
+		Credential: config.Credential{
+			Kind:       config.CredentialOAuth,
+			OAuthToken: m.token,
+		},
+		SelectModel: &ActionSelectModel{
+			Provider:  m.provider,
+			Model:     m.model,
+			ModelType: m.modelType,
+		},
 	}
+}
 
-	return ActionSelectModel{
-		Provider:  m.provider,
-		Model:     m.model,
-		ModelType: m.modelType,
-	}
+// NewOAuthForAuth creates an OAuth dialog for the auth-switch flow.
+func NewOAuthForAuth(
+	com *common.Common,
+	provider config.ProviderMetadata,
+	model config.SelectedModel,
+	modelType config.SelectedModelType,
+) (*OAuth, tea.Cmd) {
+	return newOAuth(com, false, provider, model, modelType, newGoogleOAuthAdapter())
 }

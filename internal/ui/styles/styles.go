@@ -154,6 +154,10 @@ type Styles struct {
 	EditorPromptShellIconBlurred lipgloss.Style
 	EditorPromptShellDotsFocused lipgloss.Style
 	EditorPromptShellDotsBlurred lipgloss.Style
+	EditorPromptRelayIconFocused lipgloss.Style
+	EditorPromptRelayIconBlurred lipgloss.Style
+	EditorPromptRelayDotsFocused lipgloss.Style
+	EditorPromptRelayDotsBlurred lipgloss.Style
 
 	// Radio
 	RadioOn  lipgloss.Style
@@ -309,8 +313,9 @@ type Styles struct {
 		JobDescription lipgloss.Style // Description text
 
 		// Agent task styles
-		AgentTaskTag lipgloss.Style // Agent task tag (blue background, bold)
-		AgentPrompt  lipgloss.Style // Agent prompt text
+		AgentTaskTag       lipgloss.Style // Agent task tag (blue background, bold)
+		AgentPrompt        lipgloss.Style // Agent prompt text
+		DispatchSectionTag lipgloss.Style // Dispatch section label (subtle, muted)
 
 		// Agentic fetch styles
 		AgenticFetchPromptTag lipgloss.Style // Agentic fetch prompt tag (green background, bold)
@@ -1198,6 +1203,8 @@ func buildStyles(p Palette, transparent bool) Styles { //nolint:cyclop,maintidx,
 	// Agent task styles
 	s.Tool.AgentTaskTag = base.Bold(true).Padding(0, 1).MarginLeft(2).Background(blueLight).Foreground(white)
 	s.Tool.AgentPrompt = s.Muted
+	s.Tool.DispatchSectionTag = base.Bold(true).Padding(0, 1).MarginLeft(2).
+		Background(bgSubtle).Foreground(fgMuted)
 
 	// Agentic fetch styles
 	s.Tool.AgenticFetchPromptTag = base.Bold(true).Padding(0, 1).MarginLeft(2).Background(green).Foreground(border)
@@ -1242,6 +1249,10 @@ func buildStyles(p Palette, transparent bool) Styles { //nolint:cyclop,maintidx,
 	s.EditorPromptShellIconBlurred = s.EditorPromptShellIconFocused.Foreground(bgBase).Background(fgMuted)
 	s.EditorPromptShellDotsFocused = lipgloss.NewStyle().MarginRight(1).Foreground(info).SetString(":::")
 	s.EditorPromptShellDotsBlurred = s.EditorPromptShellDotsFocused.Foreground(fgMuted)
+	s.EditorPromptRelayIconFocused = lipgloss.NewStyle().MarginRight(1).Foreground(fgSubtle).Background(secondary).Bold(true)
+	s.EditorPromptRelayIconBlurred = lipgloss.NewStyle().MarginRight(1).Foreground(bgBase).Background(fgMuted).Bold(true)
+	s.EditorPromptRelayDotsFocused = lipgloss.NewStyle().MarginRight(1).Foreground(secondary).SetString(":::")
+	s.EditorPromptRelayDotsBlurred = s.EditorPromptRelayDotsFocused.Foreground(fgMuted)
 
 	s.RadioOn = s.HalfMuted.SetString(RadioOn)
 	s.RadioOff = s.HalfMuted.SetString(RadioOff)

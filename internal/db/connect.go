@@ -7,18 +7,9 @@ import (
 	"log/slog"
 	"path/filepath"
 
+	"github.com/dmora/crucible/internal/db/dbopen"
 	"github.com/pressly/goose/v3"
 )
-
-var pragmas = map[string]string{
-	"foreign_keys":  "ON",
-	"journal_mode":  "WAL",
-	"page_size":     "4096",
-	"cache_size":    "-8000",
-	"synchronous":   "NORMAL",
-	"secure_delete": "ON",
-	"busy_timeout":  "30000",
-}
 
 // Connect opens a SQLite database connection and runs migrations.
 func Connect(ctx context.Context, dataDir string) (*sql.DB, error) {
@@ -27,7 +18,7 @@ func Connect(ctx context.Context, dataDir string) (*sql.DB, error) {
 	}
 	dbPath := filepath.Join(dataDir, "crucible.db")
 
-	db, err := openDB(dbPath)
+	db, err := dbopen.Open(dbPath)
 	if err != nil {
 		return nil, err
 	}

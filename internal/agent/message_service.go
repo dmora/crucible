@@ -41,7 +41,15 @@ func (s *adkMessageService) List(ctx context.Context, sessionID string) ([]messa
 		}
 		return nil, fmt.Errorf("list messages: %w", err)
 	}
-	return eventsToMessages(resp.Session.Events(), sessionID), nil
+
+	// Standard ADK event messages (supervisor + shell + relay summaries).
+	msgs := eventsToMessages(resp.Session.Events(), sessionID)
+
+	// Relay replay messages from ADK state (full fidelity).
+	relayMsgs := relayLogToMessages(resp.Session, sessionID)
+
+	// Merge chronologically.
+	return mergeByTimestamp(msgs, relayMsgs), nil
 }
 
 func (s *adkMessageService) ListUserMessages(ctx context.Context, sessionID string) ([]message.Message, error) {

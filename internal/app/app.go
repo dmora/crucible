@@ -26,6 +26,7 @@ import (
 	"github.com/dmora/crucible/internal/askuser"
 	"github.com/dmora/crucible/internal/config"
 	"github.com/dmora/crucible/internal/db"
+	"github.com/dmora/crucible/internal/db/global"
 	"github.com/dmora/crucible/internal/event"
 	"github.com/dmora/crucible/internal/filetracker"
 	"github.com/dmora/crucible/internal/format"
@@ -81,13 +82,17 @@ type App struct {
 	// worktreeManager is non-nil when worktree isolation is enabled.
 	worktreeManager *worktree.Manager
 
+	// globalIndexWriter is non-nil when the global session index is active.
+	globalIndexWriter *global.Writer
+
 	// global context and cleanup functions
 	globalCtx    context.Context
 	cleanupFuncs []func(context.Context) error
 }
 
 // New initializes a new application instance.
-func New(ctx context.Context, conn *sql.DB, cfg *config.Config) (*App, error) {
+// globalDB may be nil if the global session index is unavailable.
+func New(ctx context.Context, conn *sql.DB, globalDB *sql.DB, cfg *config.Config) (*App, error) {
 	q := db.New(conn)
 
 	// Create GORM-backed ADK session service in a separate DB file.
@@ -122,10 +127,22 @@ func New(ctx context.Context, conn *sql.DB, cfg *config.Config) (*App, error) {
 	// is nil at definition time but populated before any delete can fire.
 	var app *App
 
+	// Build session service options.
+	var sessionOpts []session.ServiceOption
+
+	// Wire global session index if available.
+	var globalWriter *global.Writer
+	if globalDB != nil {
+		globalQueries := global.New(globalDB)
+		largeModel := cfg.Models[config.SelectedModelTypeLarge]
+		globalWriter = global.NewWriter(globalQueries, cfg.WorkingDir(), largeModel.Model, largeModel.Provider)
+		sessionOpts = append(sessionOpts, session.WithGlobalIndex(globalWriter))
+	}
+
 	// Crucible session service with full teardown on delete.
 	// PreDelete runs BEFORE the DB transaction — cancels agents and purges state.
 	// OnDelete runs AFTER DB commit — cleans up external ADK session data.
-	sessions := session.NewService(q, conn,
+	sessionOpts = append(sessionOpts,
 		session.WithPreDelete(func(ctx context.Context, id string) {
 			// 1. Cancel active request + summarize + clear queued prompts.
 			if app != nil && app.AgentCoordinator != nil {
@@ -159,6 +176,7 @@ func New(ctx context.Context, conn *sql.DB, cfg *config.Config) (*App, error) {
 			}
 		}),
 	)
+	sessions := session.NewService(q, conn, sessionOpts...)
 
 	files := history.NewService(q, conn)
 	skipPermissionsRequests := cfg.Permissions != nil && cfg.Permissions.SkipRequests
@@ -181,7 +199,8 @@ func New(ctx context.Context, conn *sql.DB, cfg *config.Config) (*App, error) {
 		AskUser:     askuser.NewService(false),
 		FileTracker: filetracker.NewService(q),
 
-		globalCtx: ctx,
+		globalCtx:         ctx,
+		globalIndexWriter: globalWriter,
 
 		config: cfg,
 
@@ -207,6 +226,11 @@ func New(ctx context.Context, conn *sql.DB, cfg *config.Config) (*App, error) {
 		func(context.Context) error { return conn.Close() },
 		mcp.Close,
 	)
+	if globalDB != nil {
+		app.cleanupFuncs = append(app.cleanupFuncs,
+			func(context.Context) error { return globalDB.Close() },
+		)
+	}
 
 	if err := app.InitCoderAgent(ctx); err != nil {
 		return nil, fmt.Errorf("failed to initialize coder agent: %w", err)
@@ -417,7 +441,15 @@ func (app *App) UpdateAgentModel(ctx context.Context) error {
 	if app.AgentCoordinator == nil {
 		return fmt.Errorf("agent configuration is missing")
 	}
-	return app.AgentCoordinator.UpdateModels(ctx)
+	if err := app.AgentCoordinator.UpdateModels(ctx); err != nil {
+		return err
+	}
+	// Sync model/provider to global index writer.
+	if app.globalIndexWriter != nil {
+		largeModel := app.config.Models[config.SelectedModelTypeLarge]
+		app.globalIndexWriter.SetModelInfo(largeModel.Model, largeModel.Provider)
+	}
+	return nil
 }
 
 // overrideModelsForNonInteractive parses the model strings and temporarily
@@ -627,6 +659,9 @@ func (app *App) initWorktrees(ctx context.Context) {
 				if err != nil {
 					return "", "", err
 				}
+				if app.globalIndexWriter != nil {
+					app.globalIndexWriter.SetWorktreeBranch(context.Background(), sessionID, info.Branch)
+				}
 				return info.ResolvedCWD, info.Branch, nil
 			},
 			func(sessionID string) (string, string, bool) {
@@ -643,6 +678,9 @@ func (app *App) initWorktrees(ctx context.Context) {
 	for _, id := range activeIDs {
 		if info, ok := mgr.Status(id); ok {
 			app.AgentCoordinator.SetWorktreeInfo(id, info.ResolvedCWD, info.Branch)
+			if app.globalIndexWriter != nil {
+				app.globalIndexWriter.SetWorktreeBranch(ctx, id, info.Branch)
+			}
 		}
 	}
 }

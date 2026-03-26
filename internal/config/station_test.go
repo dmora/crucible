@@ -8,16 +8,16 @@ import (
 )
 
 func TestSetupDefaultStations_UserOverrideMergesWithDefaults(t *testing.T) {
-	userStations := []byte(`{"stations":{"draft":{"backend":"codex"}}}`)
+	userStations := []byte(`{"stations":{"plan":{"backend":"codex"}}}`)
 	cfg, err := loadFromBytes([][]byte{stationDefaultsJSON(), userStations})
 	require.NoError(t, err)
 	cfg.SetupDefaultStations()
 
-	draft := cfg.Stations["draft"]
-	assert.Equal(t, "codex", draft.Backend, "user backend should override default")
-	assert.NotEmpty(t, draft.Description, "should inherit Description from defaults")
-	assert.NotEmpty(t, draft.Steering, "should inherit Steering from defaults")
-	assert.Equal(t, "plan", draft.Options["mode"], "should inherit Options from defaults")
+	plan := cfg.Stations["plan"]
+	assert.Equal(t, "codex", plan.Backend, "user backend should override default")
+	assert.NotEmpty(t, plan.Description, "should inherit Description from defaults")
+	assert.NotEmpty(t, plan.Steering, "should inherit Steering from defaults")
+	assert.Equal(t, "plan", plan.Options["mode"], "should inherit Options from defaults")
 
 	// Other default stations should exist unchanged.
 	_, hasInspect := cfg.Stations["inspect"]
@@ -58,7 +58,7 @@ func TestStationMerge_AllFieldsPreserved(t *testing.T) {
 	userConfig := []byte(`{
 		"stations": {
 			"design":  {"backend":"opencode-acp","skill":"claude-foundry:design","artifact_type":"design"},
-			"draft":   {"backend":"opencode-acp","options":{"mode":"plan"},"artifact_type":"spec"},
+			"plan":    {"backend":"opencode-acp","options":{"mode":"plan"},"artifact_type":"spec"},
 			"inspect": {"backend":"opencode-acp","skill":"review-plan","artifact_type":"report"},
 			"build":   {"backend":"opencode-acp","skill":"feature-dev:feature-dev","artifact_type":"patch"},
 			"review":  {"backend":"opencode-acp","skill":"claude-code-quality:rigorous-pr-review","options":{"mode":"plan"},"artifact_type":"verdict"},

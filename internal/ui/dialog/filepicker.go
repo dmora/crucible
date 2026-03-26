@@ -35,6 +35,8 @@ type FilePicker struct {
 	help            help.Model
 	previewingImage bool // indicates if an image is being previewed
 	isTmux          bool
+	allowedTypes    []string                 // file extensions to show (e.g. ".json", ".png")
+	onSelect        func(path string) Action // if set, called on selection instead of ActionFilePickerSelected
 
 	km struct {
 		Select,
@@ -57,10 +59,28 @@ func (f *FilePicker) CellSize() fimage.CellSize {
 
 var _ Dialog = (*FilePicker)(nil)
 
+// FilePickerOption configures optional behavior on the [FilePicker].
+type FilePickerOption func(*FilePicker)
+
+// WithAllowedTypes overrides the default allowed file types.
+func WithAllowedTypes(types []string) FilePickerOption {
+	return func(f *FilePicker) { f.allowedTypes = types }
+}
+
+// WithOnSelect sets a callback invoked on file selection. When set, the callback's
+// return value replaces the default ActionFilePickerSelected action.
+func WithOnSelect(fn func(path string) Action) FilePickerOption {
+	return func(f *FilePicker) { f.onSelect = fn }
+}
+
 // NewFilePicker creates a new [FilePicker] dialog.
-func NewFilePicker(com *common.Common) (*FilePicker, tea.Cmd) {
+func NewFilePicker(com *common.Common, opts ...FilePickerOption) (*FilePicker, tea.Cmd) {
 	f := new(FilePicker)
 	f.com = com
+	f.allowedTypes = common.AllowedImageTypes
+	for _, opt := range opts {
+		opt(f)
+	}
 
 	help := help.New()
 	help.Styles = com.Styles.DialogHelpStyles()
@@ -97,7 +117,7 @@ func NewFilePicker(com *common.Common) (*FilePicker, tea.Cmd) {
 	)
 
 	fp := filepicker.New()
-	fp.AllowedTypes = common.AllowedImageTypes
+	fp.AllowedTypes = f.allowedTypes
 	fp.ShowPermissions = false
 	fp.ShowSize = false
 	fp.AutoHeight = false
@@ -208,6 +228,9 @@ func (f *FilePicker) HandleMsg(msg tea.Msg) Action {
 	}
 
 	if didSelect, path := f.fp.DidSelectFile(msg); didSelect {
+		if f.onSelect != nil {
+			return f.onSelect(path)
+		}
 		return ActionFilePickerSelected{Path: path}
 	}
 

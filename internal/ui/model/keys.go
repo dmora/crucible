@@ -68,6 +68,7 @@ type KeyMap struct {
 	Hold      key.Binding
 	Artifacts key.Binding
 	Equipment key.Binding
+	Relay     key.Binding
 }
 
 func DefaultKeyMap() KeyMap {
@@ -116,6 +117,10 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("ctrl+e"),
 			key.WithHelp("ctrl+e", "equipment"),
 		),
+		Relay: key.NewBinding(
+			key.WithKeys("ctrl+r"),
+			key.WithHelp("ctrl+r", "relay"),
+		),
 	}
 
 	km.Editor.AddFile = key.NewBinding(
@@ -154,8 +159,8 @@ func DefaultKeyMap() KeyMap {
 		key.WithHelp("/", "commands"),
 	)
 	km.Editor.AttachmentDeleteMode = key.NewBinding(
-		key.WithKeys("ctrl+r"),
-		key.WithHelp("ctrl+r+{i}", "delete attachment at index i"),
+		key.WithKeys("ctrl+shift+r"),
+		key.WithHelp("ctrl+shift+r+{i}", "delete attachment at index i"),
 	)
 	km.Editor.Escape = key.NewBinding(
 		key.WithKeys("esc", "alt+esc"),

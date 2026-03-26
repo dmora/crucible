@@ -3,6 +3,7 @@ package chat
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -41,7 +42,12 @@ const maxVisibleActivity = 5
 
 // stationParams represents the parameters for a station tool call.
 type stationParams struct {
-	Task string `json:"task"`
+	Task            string   `json:"task"`
+	TaskDescription string   `json:"task_description,omitempty"`
+	Assumptions     []string `json:"assumptions,omitempty"` // keep for replay compat
+	ContextHints    []string `json:"context_hints,omitempty"`
+	Constraints     []string `json:"constraints,omitempty"`
+	SuccessCriteria []string `json:"success_criteria,omitempty"`
 }
 
 // StationToolMessageItem renders a factory station tool with live activity from the sub-agent.
@@ -69,6 +75,11 @@ func NewStationToolMessageItem(
 	t := &StationToolMessageItem{stationName: stationName}
 	t.baseToolMessageItem = newBaseToolMessageItem(sty, toolCall, result, &stationToolRenderContext{st: t}, canceled)
 	return t
+}
+
+// StationName implements LiveStationItem.
+func (t *StationToolMessageItem) StationName() string {
+	return t.ToolCall().Name
 }
 
 // SetBranch sets the worktree branch name for the station card badge.
@@ -175,7 +186,7 @@ func (r *stationToolRenderContext) RenderTool(sty *styles.Styles, width int, opt
 		return r.compactLine(sty, header, summary)
 	}
 
-	return r.fullRender(sty, opts, summary, header, params.Task, cappedWidth)
+	return r.fullRender(sty, opts, summary, header, params, cappedWidth)
 }
 
 // stationHeader builds the enriched header: "● Draft · Editing · 0:42"
@@ -208,12 +219,124 @@ func (r *stationToolRenderContext) compactLine(sty *styles.Styles, header string
 	return header
 }
 
+// indentText prepends n spaces to each line of s.
+func indentText(s string, n int) string {
+	pad := strings.Repeat(" ", n)
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		lines[i] = pad + l
+	}
+	return strings.Join(lines, "\n")
+}
+
+// renderTaskDescription renders the task_description as wrapped prose, indented
+// to align with the task prompt text. Returns empty string when desc is empty.
+func renderTaskDescription(sty *styles.Styles, desc string, taskTagWidth, cappedWidth int) string {
+	if desc == "" {
+		return ""
+	}
+	// Derive indent from the task tag geometry — the description aligns
+	// with the task prompt text, not a hardcoded offset.
+	descIndent := taskTagWidth + 1 // +1 for the space between tag and prompt
+	descWidth := min(cappedWidth-descIndent, maxTextWidth-descIndent)
+	if descWidth < 20 {
+		// Narrow fallback: drop indent, render full-width below the tag line.
+		descIndent = 0
+		descWidth = min(cappedWidth, maxTextWidth)
+	}
+	descText := sty.Subtle.Width(descWidth).Render(desc)
+	if descIndent > 0 {
+		descText = indentText(descText, descIndent)
+	}
+	return descText
+}
+
+// renderDispatchSections renders the optional structured dispatch fields
+// (assumptions, context, constraints, success criteria) beneath the task line.
+// Returns empty string when no structured fields are present.
+// dispatchSection pairs a heading with its items for structured dispatch rendering.
+type dispatchSection struct {
+	heading string
+	items   []string
+}
+
+// filterItems returns non-blank items with whitespace trimmed.
+func filterItems(items []string) []string {
+	var out []string
+	for _, item := range items {
+		if trimmed := strings.TrimSpace(item); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
+}
+
+// renderDispatchSection renders a single section tag with its bullet items.
+// All items must be pre-filtered (non-blank, trimmed).
+func renderDispatchSection(sty *styles.Styles, sec dispatchSection, tagWidth, width int) string {
+	tag := sty.Tool.DispatchSectionTag.Render(sec.heading)
+	itemWidth := max(min(width-tagWidth-1, maxTextWidth-tagWidth-1), 1)
+
+	lines := make([]string, 0, 1+len(sec.items))
+	lines = append(lines, tag)
+	for _, item := range sec.items {
+		text := sty.Subtle.Width(itemWidth).Render("· " + item)
+		// Indent every line of the rendered text (hanging indent for wraps).
+		lines = append(lines, indentText(text, tagWidth+1))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func renderDispatchSections(sty *styles.Styles, params stationParams, width int) string {
+	// Pre-filter items: trim whitespace and drop blanks before any layout work.
+	sections := []dispatchSection{
+		{"Assumptions", filterItems(params.Assumptions)},
+		{"Context", filterItems(params.ContextHints)},
+		{"Constraints", filterItems(params.Constraints)},
+		{"Success Criteria", filterItems(params.SuccessCriteria)},
+	}
+
+	// Pre-compute max tag width across non-empty sections.
+	var maxTagWidth int
+	for _, sec := range sections {
+		if len(sec.items) == 0 {
+			continue
+		}
+		w := lipgloss.Width(sty.Tool.DispatchSectionTag.Render(sec.heading))
+		if w > maxTagWidth {
+			maxTagWidth = w
+		}
+	}
+
+	// Narrow-width fallback: if the terminal is too narrow for widest-tag
+	// alignment (itemWidth would be <= 0), fall back to per-tag indentation.
+	usePerTagIndent := width <= maxTagWidth+1
+
+	var parts []string
+	for _, sec := range sections {
+		if len(sec.items) == 0 {
+			continue
+		}
+		tagWidth := maxTagWidth
+		if usePerTagIndent {
+			tagWidth = lipgloss.Width(sty.Tool.DispatchSectionTag.Render(sec.heading))
+		}
+		parts = append(parts, renderDispatchSection(sty, sec, tagWidth, width))
+	}
+
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, "\n")
+}
+
 // fullRender builds the full station card with task, activity tree, verdict, and result.
 func (r *stationToolRenderContext) fullRender(
 	sty *styles.Styles,
 	opts *ToolRenderOpts,
 	summary StationSummary,
-	header, task string,
+	header string,
+	params stationParams,
 	cappedWidth int,
 ) string {
 	// Build the task tag + prompt.
@@ -221,7 +344,7 @@ func (r *stationToolRenderContext) fullRender(
 	taskTagWidth := lipgloss.Width(taskTag)
 	remainingWidth := min(cappedWidth-taskTagWidth-3, maxTextWidth-taskTagWidth-3)
 
-	taskOneLine := strings.ReplaceAll(task, "\n", " ")
+	taskOneLine := strings.ReplaceAll(params.Task, "\n", " ")
 	taskText := sty.Tool.AgentPrompt.Width(remainingWidth).Render(taskOneLine)
 
 	header = lipgloss.JoinVertical(
@@ -230,6 +353,16 @@ func (r *stationToolRenderContext) fullRender(
 		"",
 		lipgloss.JoinHorizontal(lipgloss.Left, taskTag, " ", taskText),
 	)
+
+	// Render task_description as wrapped prose beneath the Task tag line.
+	if descText := renderTaskDescription(sty, params.TaskDescription, taskTagWidth, cappedWidth); descText != "" {
+		header = lipgloss.JoinVertical(lipgloss.Left, header, descText)
+	}
+
+	// Append structured dispatch sections (assumptions, context, constraints, success criteria).
+	if sections := renderDispatchSections(sty, params, cappedWidth); sections != "" {
+		header = lipgloss.JoinVertical(lipgloss.Left, header, sections)
+	}
 
 	// Tree prefix width calculation.
 	treeLPadding := 2
@@ -308,6 +441,10 @@ func verdictLine(sty *styles.Styles, summary StationSummary, width int) string {
 	}
 	if summary.CommandsRun > 0 {
 		parts = append(parts, sty.Subtle.Render(fmt.Sprintf("%d commands", summary.CommandsRun)))
+	}
+	if summary.ArtifactPath != "" {
+		short := filepath.Base(summary.ArtifactPath)
+		parts = append(parts, sty.Subtle.Render("spec: "+short))
 	}
 
 	line := sty.Subtle.MaxWidth(width).Render(strings.Join(parts, sep))

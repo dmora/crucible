@@ -73,11 +73,17 @@ func stationConfigInfo(t *styles.Styles, stations map[string]config.StationConfi
 		}
 
 		desc := stationDesc(cfg)
-		rows = append(rows, common.Status(t, common.StatusOpts{
+		line := common.Status(t, common.StatusOpts{
 			Icon:        icon,
 			Title:       t.ResourceName.Render(name),
 			Description: t.ResourceStatus.Render(desc),
-		}, width))
+		}, width)
+
+		if constraints := stationConstraints(cfg); constraints != "" {
+			indent := "           "
+			line += "\n" + t.ResourceAdditionalText.Render(indent+constraints)
+		}
+		rows = append(rows, line)
 	}
 
 	list := lipgloss.JoinVertical(lipgloss.Left, rows...)
@@ -95,6 +101,22 @@ func stationDesc(cfg config.StationConfig) string {
 	}
 	if cfg.Skill != "" {
 		parts = append(parts, cfg.Skill)
+	}
+	return strings.Join(parts, " · ")
+}
+
+// stationConstraints builds a compact route constraint string like
+// "requires: plan · after done: review". Returns "" if no constraints.
+func stationConstraints(cfg config.StationConfig) string {
+	var parts []string
+	if len(cfg.Requires) > 0 {
+		parts = append(parts, "requires: "+strings.Join(cfg.Requires, ", "))
+	}
+	if len(cfg.AfterDone) > 0 {
+		parts = append(parts, "after done: "+strings.Join(cfg.AfterDone, ", "))
+	}
+	if cfg.Gate {
+		parts = append(parts, "gate")
 	}
 	return strings.Join(parts, " · ")
 }

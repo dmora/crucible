@@ -571,10 +571,35 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.Payload.Type {
 		case agent.ProcessEventActivityUpdate:
 			m.updateStationActivity()
+			if m.chat.Follow() {
+				if cmd := m.chat.ScrollToBottomAndAnimate(); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
+			}
 		case agent.ProcessEventDispatchUpdate:
 			if m.session != nil {
 				m.dispatchLog = agent.GetDispatchLog(m.session.ID)
 			}
+		case agent.ProcessEventRetry:
+			cmds = append(cmds, func() tea.Msg {
+				return util.InfoMsg{
+					Type: util.InfoTypeWarn,
+					Msg: fmt.Sprintf("RETRY: %s failed (%d/%d)",
+						msg.Payload.RetryTool,
+						msg.Payload.RetryAttempt,
+						msg.Payload.RetryMax),
+				}
+			})
+		case agent.ProcessEventRetryExhausted:
+			cmds = append(cmds, func() tea.Msg {
+				return util.InfoMsg{
+					Type: util.InfoTypeError,
+					Msg: fmt.Sprintf("EXHAUSTED: %s failed %d times — giving up",
+						msg.Payload.RetryTool,
+						msg.Payload.RetryMax),
+					TTL: 8 * time.Second,
+				}
+			})
 		}
 	case pubsub.Event[mcp.Event]:
 		switch msg.Payload.Type {
@@ -833,7 +858,11 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.textarea.Placeholder = m.turnMetricsPlaceholder()
 	} else {
 		shellPrefix := strings.HasPrefix(m.textarea.Value(), "!")
-		mode := resolveEditorMode(m.isHoldActive(), m.isYoloActive(), shellPrefix)
+		var relayTarget *string
+		if m.hasSession() && m.com.App.AgentCoordinator != nil {
+			relayTarget = m.com.App.AgentCoordinator.RelayTarget(m.session.ID)
+		}
+		mode := resolveEditorMode(m.isHoldActive(), m.isYoloActive(), shellPrefix, relayTarget)
 		m.textarea.Placeholder = resolveEditorPlaceholder(mode, m.readyPlaceholder)
 	}
 
@@ -1286,6 +1315,41 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 			cmds = append(cmds, cmd)
 		}
 
+	// Auth sub-dialog opener (generic — auth.go pushes sub-dialogs via this action)
+	case dialog.ActionOpenSubDialog:
+		m.dialog.OpenDialog(msg.Dialog)
+		if msg.Cmd != nil {
+			cmds = append(cmds, msg.Cmd)
+		}
+
+	// Auth credential ready (sub-dialog completed with a credential)
+	case dialog.ActionCredentialReady:
+		cfg := m.com.Config()
+		if err := cfg.SetProviderCredential(msg.ProviderID, msg.Credential); err != nil {
+			cmds = append(cmds, util.ReportError(err))
+			break
+		}
+		m.dialog.CloseDialog(dialog.AuthID)
+		m.dialog.CloseDialog(dialog.APIKeyInputID)
+		m.dialog.CloseDialog(dialog.OAuthID)
+		m.dialog.CloseDialog(dialog.FilePickerID)
+
+		// If this credential came from a model-selection flow (first-time auth
+		// or re-auth), re-emit ActionSelectModel to complete model selection
+		// and onboarding. Otherwise just rebuild auth in place.
+		if msg.SelectModel != nil {
+			sel := *msg.SelectModel
+			cmds = append(cmds, func() tea.Msg { return sel })
+		} else {
+			cmds = append(cmds, func() tea.Msg {
+				if err := m.com.App.UpdateAgentModel(context.TODO()); err != nil {
+					return util.NewErrorMsg(fmt.Errorf("auth rebuild failed: %w", err))
+				}
+				auth := m.com.App.AgentCoordinator.Model().Auth
+				return util.NewInfoMsg("Auth switched to " + auth.HeaderDesignation())
+			})
+		}
+
 	// Command dialog messages
 	case dialog.ActionToggleYoloMode:
 		yolo := !m.com.App.Permissions.SkipRequests()
@@ -1294,6 +1358,11 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 	case dialog.ActionToggleHold:
 		m.dialog.CloseDialog(dialog.CommandsID)
 		if cmd := m.toggleHold(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	case dialog.ActionSkipPlan:
+		m.dialog.CloseDialog(dialog.CommandsID)
+		if cmd := m.skipPlanEnforcement(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
 	case dialog.ActionNewSession:
@@ -1482,6 +1551,28 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 		if cmd := m.applyTheme(themeID); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
+	case dialog.ActionSelectRelay:
+		m.dialog.CloseDialog(dialog.RelayDialogID)
+		coordinator := m.com.App.AgentCoordinator
+		if coordinator != nil && m.hasSession() {
+			sid := m.session.ID
+			currentTarget := coordinator.RelayTarget(sid)
+
+			// Block relay start/switch while the supervisor is busy (not relay-busy).
+			if currentTarget == nil && coordinator.IsSessionBusy(sid) {
+				cmds = append(cmds, util.ReportWarn("Agent is busy, wait before entering relay mode"))
+				break
+			}
+
+			if msg.Station == "" {
+				cmds = append(cmds, m.stopRelay())
+			} else if currentTarget != nil && *currentTarget == msg.Station { //nolint:revive // intentional no-op
+			} else if currentTarget != nil {
+				cmds = append(cmds, m.switchRelay(msg.Station))
+			} else {
+				cmds = append(cmds, m.startRelay(msg.Station))
+			}
+		}
 	case dialog.ActionSelectSpinner:
 		m.dialog.CloseDialog(dialog.SpinnerDialogID)
 		if cmd := m.applySpinner(msg.Preset); cmd != nil {
@@ -1509,6 +1600,21 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 			}
 		}
 		m.com.App.AskUser.Respond(msg.RequestID, msg.Response)
+
+	case dialog.ActionReloadStations:
+		// Re-register station names for UI tool routing.
+		stationNames := make([]string, 0, len(m.com.Config().Stations))
+		for name, scfg := range m.com.Config().Stations {
+			if !scfg.Disabled {
+				stationNames = append(stationNames, name)
+			}
+		}
+		chat.RegisterStationNames(stationNames)
+
+		// Reload processManagers on the coordinator.
+		if m.com.App.AgentCoordinator != nil {
+			m.com.App.AgentCoordinator.ReloadStations()
+		}
 
 	case dialog.ActionFilePickerSelected:
 		cmds = append(cmds, tea.Sequence(
@@ -1638,6 +1744,11 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 				cmds = append(cmds, cmd)
 			}
 			return true
+		case key.Matches(msg, m.keyMap.Relay):
+			if m.hasSession() {
+				m.openRelayDialog()
+			}
+			return true
 		case key.Matches(msg, m.keyMap.Chat.Details) && m.isCompact:
 			m.detailsOpen = !m.detailsOpen
 			m.updateLayoutAndSize()
@@ -1760,6 +1871,15 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 				value = strings.TrimSpace(value)
 				if value == "exit" || value == "quit" {
 					return m.openQuitDialog()
+				}
+
+				// Relay mode: route to station directly.
+				if m.hasSession() && m.com.App.AgentCoordinator != nil &&
+					m.com.App.AgentCoordinator.IsRelayActive(m.session.ID) {
+					if value != "" {
+						return m.sendRelayMessage(value)
+					}
+					return nil
 				}
 
 				// Shell escape: "!command" runs a command directly.
@@ -2673,11 +2793,15 @@ const (
 	editorModeYolo
 	editorModeHold
 	editorModeShell
+	editorModeRelay
 )
 
-// resolveEditorMode returns the active editor mode based on shell/hold/yolo state.
-// Priority: shell > hold > yolo > normal (shell is a visual override while typing).
-func resolveEditorMode(holdActive, yoloActive, shellPrefix bool) editorMode {
+// resolveEditorMode returns the active editor mode based on relay/shell/hold/yolo state.
+// Priority: relay > shell > hold > yolo > normal.
+func resolveEditorMode(holdActive, yoloActive, shellPrefix bool, relayTarget *string) editorMode {
+	if relayTarget != nil {
+		return editorModeRelay
+	}
 	if shellPrefix {
 		return editorModeShell
 	}
@@ -2693,6 +2817,8 @@ func resolveEditorMode(holdActive, yoloActive, shellPrefix bool) editorMode {
 // resolveEditorPlaceholder returns the placeholder text for the given mode.
 func resolveEditorPlaceholder(mode editorMode, readyPlaceholder string) string {
 	switch mode {
+	case editorModeRelay:
+		return "Relay mode — messages go directly to the station"
 	case editorModeHold:
 		return "Hold active"
 	case editorModeYolo:
@@ -2709,7 +2835,11 @@ func resolveEditorPlaceholder(mode editorMode, readyPlaceholder string) string {
 func (m *UI) editorPromptFunc(info textarea.PromptInfo) string {
 	t := m.com.Styles
 	shellPrefix := strings.HasPrefix(m.textarea.Value(), "!")
-	mode := resolveEditorMode(m.isHoldActive(), m.isYoloActive(), shellPrefix)
+	var relayTarget *string
+	if m.hasSession() && m.com.App.AgentCoordinator != nil {
+		relayTarget = m.com.App.AgentCoordinator.RelayTarget(m.session.ID)
+	}
+	mode := resolveEditorMode(m.isHoldActive(), m.isYoloActive(), shellPrefix, relayTarget)
 
 	switch mode {
 	case editorModeHold:
@@ -2747,6 +2877,22 @@ func (m *UI) editorPromptFunc(info textarea.PromptInfo) string {
 			return t.EditorPromptShellDotsFocused.Render()
 		}
 		return t.EditorPromptShellDotsBlurred.Render()
+
+	case editorModeRelay:
+		if info.LineNumber == 0 {
+			label := " RELAY "
+			if relayTarget != nil {
+				label = " ↗ " + strings.ToUpper(*relayTarget) + " "
+			}
+			if info.Focused {
+				return t.EditorPromptRelayIconFocused.Render(label)
+			}
+			return t.EditorPromptRelayIconBlurred.Render(label)
+		}
+		if info.Focused {
+			return t.EditorPromptRelayDotsFocused.Render()
+		}
+		return t.EditorPromptRelayDotsBlurred.Render()
 
 	default: // editorModeNormal
 		if info.LineNumber == 0 {
@@ -2949,6 +3095,19 @@ func (m *UI) toggleHold() tea.Cmd {
 	return util.ReportInfo("Hold set — all station calls require approval until cleared")
 }
 
+// skipPlanEnforcement sets a session-level flag that bypasses artifact enforcement
+// for all remaining dispatches in this session.
+func (m *UI) skipPlanEnforcement() tea.Cmd {
+	coord := m.com.App.AgentCoordinator
+	if coord == nil || !m.hasSession() {
+		return util.ReportWarn("No active session")
+	}
+	if err := coord.SkipArtifactCheck(context.Background(), m.session.ID); err != nil {
+		return util.ReportError(fmt.Errorf("skip plan enforcement: %w", err))
+	}
+	return util.ReportInfo("Plan enforcement skipped for this session")
+}
+
 // hasSession returns true if there is an active session with a valid ID.
 func (m *UI) hasSession() bool {
 	return m.session != nil && m.session.ID != ""
@@ -3077,6 +3236,80 @@ func (m *UI) executeShellCommand(cmd string) tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
+// --- Relay mode helpers ---
+
+// openRelayDialog opens the station picker for relay mode.
+func (m *UI) openRelayDialog() {
+	coordinator := m.com.App.AgentCoordinator
+	if coordinator == nil {
+		return
+	}
+	stations := m.com.Config().Stations
+	currentTarget := coordinator.RelayTarget(m.session.ID)
+	d := dialog.NewRelay(m.com, stations, currentTarget)
+	m.dialog.OpenDialog(d)
+}
+
+// sendRelayMessage sends a message to the active relay station.
+func (m *UI) sendRelayMessage(content string) tea.Cmd {
+	coordinator := m.com.App.AgentCoordinator
+	if coordinator == nil {
+		return nil
+	}
+	sessionID := m.session.ID
+	return func() tea.Msg {
+		if err := coordinator.SendRelay(context.Background(), sessionID, content); err != nil {
+			return util.InfoMsg{Type: util.InfoTypeError, Msg: fmt.Sprintf("Relay error: %v", err)}
+		}
+		return nil
+	}
+}
+
+// startRelay begins relay mode to the specified station.
+func (m *UI) startRelay(station string) tea.Cmd {
+	coordinator := m.com.App.AgentCoordinator
+	if coordinator == nil {
+		return nil
+	}
+	sessionID := m.session.ID
+	return func() tea.Msg {
+		if err := coordinator.StartRelay(context.Background(), sessionID, station); err != nil {
+			return util.InfoMsg{Type: util.InfoTypeError, Msg: fmt.Sprintf("Relay start error: %v", err)}
+		}
+		return util.NewInfoMsg("Relay started → " + strings.ToUpper(station))
+	}
+}
+
+// stopRelay ends relay mode and persists exchanges.
+func (m *UI) stopRelay() tea.Cmd {
+	coordinator := m.com.App.AgentCoordinator
+	if coordinator == nil {
+		return nil
+	}
+	sessionID := m.session.ID
+	return func() tea.Msg {
+		if err := coordinator.StopRelay(context.Background(), sessionID); err != nil {
+			return util.InfoMsg{Type: util.InfoTypeError, Msg: fmt.Sprintf("Relay stop error: %v", err)}
+		}
+		return util.NewInfoMsg("Relay ended → Supervisor")
+	}
+}
+
+// switchRelay switches relay target to a new station.
+func (m *UI) switchRelay(station string) tea.Cmd {
+	coordinator := m.com.App.AgentCoordinator
+	if coordinator == nil {
+		return nil
+	}
+	sessionID := m.session.ID
+	return func() tea.Msg {
+		if err := coordinator.SwitchRelay(context.Background(), sessionID, station); err != nil {
+			return util.InfoMsg{Type: util.InfoTypeError, Msg: fmt.Sprintf("Relay switch error: %v", err)}
+		}
+		return util.NewInfoMsg("Relay switched → " + strings.ToUpper(station))
+	}
+}
+
 // sendMessage sends a message with the given content and attachments.
 func (m *UI) sendMessage(content string, attachments ...message.Attachment) tea.Cmd {
 	if m.com.App.AgentCoordinator == nil {
@@ -3131,6 +3364,14 @@ func (m *UI) cancelAgent() tea.Cmd {
 
 	coordinator := m.com.App.AgentCoordinator
 	if coordinator == nil {
+		return nil
+	}
+
+	// Relay mode: single Esc cancels the current relay turn (no double-tap).
+	// If relay is active but no turn is running, fall through to supervisor cancel
+	// so Esc still works if the supervisor has a pending request.
+	if coordinator.IsRelayActive(m.session.ID) && coordinator.IsRelayTurnBusy(m.session.ID) {
+		coordinator.CancelRelayTurn(m.session.ID)
 		return nil
 	}
 
@@ -3208,11 +3449,63 @@ func (m *UI) openDialog(id string) tea.Cmd {
 		if cmd := m.openArtifactsDialog(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
+	case dialog.AuthID:
+		if cmd := m.openAuthDialog(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	case dialog.StationsID:
+		if cmd := m.openStationsDialog(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	default:
 		// Unknown dialog
 		break
 	}
 	return tea.Batch(cmds...)
+}
+
+// openStationsDialog opens the station configuration dialog.
+func (m *UI) openStationsDialog() tea.Cmd {
+	if m.dialog.ContainsDialog(dialog.StationsID) {
+		m.dialog.BringToFront(dialog.StationsID)
+		return nil
+	}
+	dlg, cmd := dialog.NewStations(m.com)
+	m.dialog.OpenDialog(dlg)
+	return cmd
+}
+
+// openAuthDialog opens the auth method selection dialog.
+func (m *UI) openAuthDialog() tea.Cmd {
+	if m.dialog.ContainsDialog(dialog.AuthID) {
+		m.dialog.BringToFront(dialog.AuthID)
+		return nil
+	}
+	providerID := ""
+	if large, ok := m.com.Config().Models[config.SelectedModelTypeLarge]; ok {
+		providerID = large.Provider
+	}
+	provider, modelCfg, modelType := m.authProviderMetadata(providerID)
+	dlg, cmd := dialog.NewAuth(m.com, providerID, provider, modelCfg, modelType)
+	m.dialog.OpenDialog(dlg)
+	return cmd
+}
+
+// authProviderMetadata builds provider context for auth sub-dialogs using the
+// coordinator's current model state and a single Providers.Get() lookup.
+func (m *UI) authProviderMetadata(providerID string) (config.ProviderMetadata, config.SelectedModel, config.SelectedModelType) {
+	agentModel := m.com.App.AgentCoordinator.Model()
+	modelCfg := agentModel.ModelCfg
+
+	provCfg, _ := m.com.Config().Providers.Get(providerID)
+	provider := config.ProviderMetadata{
+		ID:          providerID,
+		Name:        provCfg.Name,
+		Type:        provCfg.Type,
+		APIEndpoint: provCfg.BaseURL,
+	}
+
+	return provider, modelCfg, config.SelectedModelTypeLarge
 }
 
 // openQuitDialog opens the quit confirmation dialog.

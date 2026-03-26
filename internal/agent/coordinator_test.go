@@ -43,6 +43,17 @@ func (m *mockSessionAgent) StopAllProcesses(_ context.Context)                  
 func (m *mockSessionAgent) ExecuteUserShell(_ context.Context, _, _ string) error { return nil }
 func (m *mockSessionAgent) SetSessionWorktree(_, _, _ string)                     {}
 func (m *mockSessionAgent) PurgeSession(_ string)                                 {}
+func (m *mockSessionAgent) StartRelay(_ context.Context, _, _ string) error       { return nil }
+func (m *mockSessionAgent) SendRelay(_ context.Context, _, _ string) error        { return nil }
+func (m *mockSessionAgent) StopRelay(_ context.Context, _ string) error           { return nil }
+func (m *mockSessionAgent) SwitchRelay(_ context.Context, _, _ string) error      { return nil }
+func (m *mockSessionAgent) CancelRelayTurn(_ string)                              {}
+func (m *mockSessionAgent) RelayTarget(_ string) *string                          { return nil }
+func (m *mockSessionAgent) IsRelayActive(_ string) bool                           { return false }
+func (m *mockSessionAgent) IsRelayTurnBusy(_ string) bool                         { return false }
+func (m *mockSessionAgent) SkipArtifactCheck(_ context.Context, _ string) error   { return nil }
+func (m *mockSessionAgent) ReloadStations(_ *config.Config, _ map[string]config.StationConfig) {
+}
 
 func TestCoordinatorInterface(t *testing.T) {
 	// Verify coordinator implements the Coordinator interface.

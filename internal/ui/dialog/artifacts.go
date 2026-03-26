@@ -143,7 +143,7 @@ func NewArtifacts(com *common.Common, artifactSvc artifact.Service, sessionID st
 }
 
 // parseArtifactName extracts station and type from an artifact name.
-// Expected format: "station-{name}-{type}" (e.g., "station-draft-spec").
+// Expected format: "station-{name}-{type}" (e.g., "station-plan-spec").
 func parseArtifactName(name string) (station, artifactType string) {
 	rest, found := strings.CutPrefix(name, "station-")
 	if !found {

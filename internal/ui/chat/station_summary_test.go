@@ -141,7 +141,7 @@ func TestDeriveOperatorState(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := DeriveOperatorState(tt.activity, tt.phase, tt.toolStatus, tt.resultErr)
+			got := DeriveOperatorState(tt.activity, tt.phase, tt.toolStatus, tt.resultErr, false)
 			if got != tt.want {
 				t.Errorf("DeriveOperatorState() = %q, want %q", got, tt.want)
 			}

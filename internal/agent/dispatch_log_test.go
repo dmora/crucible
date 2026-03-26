@@ -49,7 +49,7 @@ func TestCompleteDispatch(t *testing.T) {
 
 	idx := AppendDispatch("sess1", "build")
 	time.Sleep(5 * time.Millisecond) // ensure non-zero duration
-	CompleteDispatch("sess1", idx, VerdictDone)
+	CompleteDispatch("sess1", idx, VerdictDone, "")
 
 	log := GetDispatchLog("sess1")
 	require.Len(t, log, 1)
@@ -64,9 +64,9 @@ func TestCompleteDispatchVerdicts(t *testing.T) {
 	idxFailed := AppendDispatch("sess1", "inspect")
 	idxCanceled := AppendDispatch("sess1", "build")
 
-	CompleteDispatch("sess1", idxDone, VerdictDone)
-	CompleteDispatch("sess1", idxFailed, VerdictFailed)
-	CompleteDispatch("sess1", idxCanceled, VerdictCanceled)
+	CompleteDispatch("sess1", idxDone, VerdictDone, "")
+	CompleteDispatch("sess1", idxFailed, VerdictFailed, "")
+	CompleteDispatch("sess1", idxCanceled, VerdictCanceled, "")
 
 	log := GetDispatchLog("sess1")
 	require.Len(t, log, 3)
@@ -81,11 +81,11 @@ func TestCompleteDispatchInvalidIndex(t *testing.T) {
 	AppendDispatch("sess1", "draft")
 
 	// Out-of-bounds index should not panic.
-	CompleteDispatch("sess1", -1, VerdictDone)
-	CompleteDispatch("sess1", 99, VerdictDone)
+	CompleteDispatch("sess1", -1, VerdictDone, "")
+	CompleteDispatch("sess1", 99, VerdictDone, "")
 
 	// Non-existent session should not panic.
-	CompleteDispatch("nonexistent", 0, VerdictDone)
+	CompleteDispatch("nonexistent", 0, VerdictDone, "")
 
 	log := GetDispatchLog("sess1")
 	require.Len(t, log, 1)
@@ -168,7 +168,7 @@ func TestCompleteDispatchSnapshotsContextUsage(t *testing.T) {
 	})
 
 	idx := AppendDispatch("sess1", "build")
-	CompleteDispatch("sess1", idx, VerdictDone)
+	CompleteDispatch("sess1", idx, VerdictDone, "")
 
 	log := GetDispatchLog("sess1")
 	require.Len(t, log, 1)
@@ -182,7 +182,7 @@ func TestCompleteDispatchNoProcessState(t *testing.T) {
 
 	// No process state — context fields should remain zero.
 	idx := AppendDispatch("sess1", "draft")
-	CompleteDispatch("sess1", idx, VerdictDone)
+	CompleteDispatch("sess1", idx, VerdictDone, "")
 
 	log := GetDispatchLog("sess1")
 	require.Len(t, log, 1)
@@ -248,4 +248,43 @@ func TestHydrateDispatchLogNilSession(t *testing.T) {
 	// Should not panic.
 	hydrateDispatchLog(nil, "sess1")
 	assert.Nil(t, GetDispatchLog("sess1"))
+}
+
+func TestCompleteDispatchWithArtifactPath(t *testing.T) {
+	clearDispatchLogs(t)
+
+	idx := AppendDispatch("sess1", "plan")
+	CompleteDispatch("sess1", idx, VerdictDone, "/tmp/spec.md")
+
+	log := GetDispatchLog("sess1")
+	require.Len(t, log, 1)
+	assert.Equal(t, "/tmp/spec.md", log[0].ArtifactPath)
+}
+
+func TestGetDispatchSeq(t *testing.T) {
+	clearDispatchLogs(t)
+
+	idx0 := AppendDispatch("sess1", "plan")
+	idx1 := AppendDispatch("sess1", "build")
+
+	assert.Equal(t, 0, getDispatchSeq("sess1", idx0))
+	assert.Equal(t, 1, getDispatchSeq("sess1", idx1))
+	assert.Equal(t, -1, getDispatchSeq("sess1", 99))
+	assert.Equal(t, -1, getDispatchSeq("nonexistent", 0))
+}
+
+func TestDurableDispatchRoundTrip_WithArtifactPath(t *testing.T) {
+	original := []durableDispatchEntry{
+		{Station: "plan", Verdict: int(VerdictDone), StartedAt: 1700000000, DurationMs: 60000, Seq: 0, ArtifactPath: "/tmp/spec.md"},
+		{Station: "build", Verdict: int(VerdictDone), StartedAt: 1700000100, DurationMs: 120000, Seq: 1},
+	}
+
+	data, err := json.Marshal(original)
+	require.NoError(t, err)
+
+	var restored []durableDispatchEntry
+	require.NoError(t, json.Unmarshal(data, &restored))
+	assert.Equal(t, original, restored)
+	assert.Equal(t, "/tmp/spec.md", restored[0].ArtifactPath)
+	assert.Empty(t, restored[1].ArtifactPath)
 }

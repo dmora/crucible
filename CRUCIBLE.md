@@ -1,34 +1,53 @@
-# Crucible — Project Context
+# Crucible Pro
 
-Crucible is a terminal application that orchestrates autonomous software development. It is built with Go.
+Private build. Public upstream: `dmora/crucible`.
 
-This is Crucible's own repository — you are working on yourself.
+## Build
 
-## Module
-
-`github.com/dmora/crucible`
-
-## Build & Test
+```
+module: github.com/dmora/crucible
+```
 
 ```bash
-go build -o bin/crucible .
+go build -o bin/crucible-pro .
 go test ./...
 go vet ./...
 ```
 
-## Project Layout
+## Structure
 
-- `cmd/` — CLI entry point
-- `internal/agent/` — Core orchestration (coordinator, station tools, prompts)
-- `internal/ui/` — TUI (Bubble Tea model, chat rendering, dialogs, styles)
-- `internal/config/` — Configuration and station setup
-- `internal/session/` — Session metadata
-- `internal/message/` — Message types and service interface
-- `internal/db/` — SQLite persistence (goose migrations)
-- `internal/pubsub/` — Generic pub/sub broker
+```
+cmd/                        # CLI entry point (cobra)
+internal/
+├── agent/                  # Core logic
+├── ui/                     # Terminal UI (Bubble Tea v2)
+│   ├── model/              # Main UI model
+│   ├── chat/               # Chat viewport
+│   ├── styles/             # Theming (5 palettes)
+│   └── dialog/             # Modals, overlays
+├── session/                # Session metadata (title, cost, tokens)
+├── message/                # Message types
+├── db/                     # SQLite persistence
+├── config/                 # Models, providers, tools, workflow
+├── askuser/                # Blocking request/response for user questions
+└── pubsub/                 # Generic pub/sub broker
+```
 
-## Key Conventions
+## Persistence
 
-- Dual SQLite: `crucible.db` for app metadata, `crucible-adk.db` for session history
-- Monochrome palette, monospace, factory nomenclature
-- Station configuration lives in `internal/config/config.go`
+| Database | Driver | Contents |
+|----------|--------|----------|
+| `crucible.db` | ncruces/go-sqlite3, goose + sqlc | Session metadata, tokens, cost |
+| `crucible-adk.db` | glebarez/sqlite, GORM | Conversations, events, state |
+
+## Config
+
+- `~/.config/crucible/crucible.json` — user prefs
+- `~/.local/share/crucible/crucible.json` — runtime state
+- `.crucible/` — databases, logs
+
+## Repo
+
+- Go module path: `github.com/dmora/crucible` (do not change — enables merge with public repo)
+- Issues: [crucible-pro issues](https://github.com/dmora/crucible-pro/issues)
+- Project board: [GitHub Project #5](https://github.com/users/dmora/projects/5)

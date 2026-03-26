@@ -14,7 +14,6 @@ import (
 	"github.com/dmora/crucible/internal/config"
 	"github.com/dmora/crucible/internal/ui/common"
 	"github.com/dmora/crucible/internal/ui/styles"
-	"github.com/dmora/crucible/internal/ui/util"
 )
 
 type APIKeyInputState int
@@ -310,16 +309,16 @@ func (m *APIKeyInput) verifyAPIKey() tea.Msg {
 }
 
 func (m *APIKeyInput) saveKeyAndContinue() Action {
-	cfg := m.com.Config()
-
-	err := cfg.SetProviderAPIKey(m.provider.ID, m.input.Value())
-	if err != nil {
-		return ActionCmd{util.ReportError(fmt.Errorf("failed to save API key: %w", err))}
-	}
-
-	return ActionSelectModel{
-		Provider:  m.provider,
-		Model:     m.model,
-		ModelType: m.modelType,
+	return ActionCredentialReady{
+		ProviderID: m.provider.ID,
+		Credential: config.Credential{
+			Kind:   config.CredentialAPIKey,
+			APIKey: m.input.Value(),
+		},
+		SelectModel: &ActionSelectModel{
+			Provider:  m.provider,
+			Model:     m.model,
+			ModelType: m.modelType,
+		},
 	}
 }

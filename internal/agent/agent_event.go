@@ -150,12 +150,8 @@ func (ep *eventProcessor) handleFunctionCall(p *genai.Part) bool {
 		slog.Warn("Tool call loop detected, stopping agent",
 			"tool", p.FunctionCall.Name,
 			"session_id", ep.msg.SessionID,
-			"consecutive", ep.ld.count,
-			"total", ep.ld.totalCalls)
+			"consecutive", ep.ld.count)
 		detail := fmt.Sprintf("Tool %q called %d times consecutively", p.FunctionCall.Name, ep.ld.count)
-		if ep.ld.totalCalls >= maxTotalToolCalls {
-			detail = fmt.Sprintf("Total tool call limit reached (%d calls)", ep.ld.totalCalls)
-		}
 		ep.msg.AddFinish(message.FinishReasonError, "Tool loop detected", detail)
 		ep.broker.Publish(pubsub.UpdatedEvent, ep.msg.Clone())
 		return true
@@ -178,11 +174,13 @@ func (ep *eventProcessor) handleFunctionResponse(p *genai.Part) bool {
 		ep.bridgeTodos(metadata)
 	}
 
+	artifactPath := extractFunctionResponseArtifactPath(p.FunctionResponse)
 	toolMsg := newInMemoryMessage(ep.msg.SessionID, message.Tool, []message.ContentPart{
 		message.ToolResult{
 			ToolCallID: p.FunctionResponse.ID,
 			Name:       p.FunctionResponse.Name,
 			Content:    content,
+			Data:       artifactPath,
 			Metadata:   metadata,
 			IsError:    isError,
 		},
@@ -212,6 +210,22 @@ func extractFunctionResponseMetadata(resp *genai.FunctionResponse) string {
 		return ""
 	}
 	return string(b)
+}
+
+// extractFunctionResponseArtifactPath extracts the artifact_path from a station
+// tool response, if present.
+func extractFunctionResponseArtifactPath(resp *genai.FunctionResponse) string {
+	if resp == nil || resp.Response == nil {
+		return ""
+	}
+	v, ok := resp.Response["artifact_path"]
+	if !ok || v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return ""
 }
 
 // bridgeTodos persists todos from tool metadata to the Crucible session.
