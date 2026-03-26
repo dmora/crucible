@@ -5,7 +5,7 @@ go 1.26.1
 require (
 	charm.land/bubbles/v2 v2.0.0
 	charm.land/bubbletea/v2 v2.0.0
-	charm.land/glamour/v2 v2.0.0-20260123212943-6014aa153a9b
+	charm.land/glamour/v2 v2.0.0
 	charm.land/lipgloss/v2 v2.0.0
 	charm.land/log/v2 v2.0.0-20251110204020-529bb77f35da
 	github.com/MakeNowJust/heredoc v1.0.0
