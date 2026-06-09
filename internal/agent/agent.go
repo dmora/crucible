@@ -476,6 +476,11 @@ func (a *sessionAgent) buildToolSet(sessionID string, largeModel Model, turnAbor
 	if a.artifactService != nil {
 		tools = append(tools, loadartifactstool.New())
 	}
+	readFileTool, err := newReadFileTool(a.collectReadRoots(sessionID))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create read_file tool: %w", err)
+	}
+	tools = append(tools, readFileTool)
 	for name, pm := range a.stations {
 		stationTool, err := newStationTool(pm, sessionID, pm.description, a.permissionService, a.holdFlag, a.notifier, turnAbort)
 		if err != nil {

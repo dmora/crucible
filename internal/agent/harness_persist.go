@@ -55,3 +55,29 @@ func (sp *StatePersister) SaveArtifact(tctx tool.Context, result string) {
 		}
 	}
 }
+
+// SaveFileArtifact reads the file at path and persists its content as an
+// artifact keyed by the path itself. This bridges the gap between files a
+// station writes to disk (surfaced to the supervisor as artifact_path) and the
+// internal artifact service: afterwards load_artifacts(path) returns the file's
+// content, even for files written outside the project tree (e.g. plan output in
+// ~/.claude/plans). Best-effort — binary/oversized/unreadable files are skipped.
+func (sp *StatePersister) SaveFileArtifact(tctx tool.Context, path string) {
+	artifacts := tctx.Artifacts()
+	if artifacts == nil || path == "" {
+		return
+	}
+	content, truncated, err := readCappedFile(path)
+	if err != nil {
+		slog.Debug("Skipping file artifact registration",
+			"station", sp.station, "path", path, "error", err)
+		return
+	}
+	if truncated {
+		content += "\n\n[truncated at size cap]"
+	}
+	if _, saveErr := artifacts.Save(tctx, path, genai.NewPartFromText(content)); saveErr != nil {
+		slog.Warn("Failed to save file artifact",
+			"station", sp.station, "path", path, "error", saveErr)
+	}
+}
