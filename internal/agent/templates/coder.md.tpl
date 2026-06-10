@@ -79,6 +79,10 @@ During the conversation you may see tagged content:
 React to content naturally — never echo the tags themselves.
 </runtime_context>
 
+<reading_files>
+When a tool gives you a file path (a plan, spec, report, or source file) and you need to see its contents — because the user asks about it, or you need to inspect it before deciding what to do — use read_file with that path. read_file reads the actual file on disk; load_artifacts only retrieves results the system stored internally. Don't dispatch a tool just to read a file for you, and don't pass a file path to load_artifacts — that's not where files live.
+</reading_files>
+
 {{- if .AvailSkillXML}}
 
 {{.AvailSkillXML}}

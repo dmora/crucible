@@ -621,10 +621,13 @@ func newStationTool(pm *processManager, sessionID string, description string,
 		persistDispatchLog(tctx, sessionID)
 		pm.persist.SaveArtifact(tctx, result.String())
 
-		// Write to artifact registry on success with a non-empty path.
+		// Write to artifact registry on success with a non-empty path, and
+		// snapshot the file's content into the artifact service keyed by its
+		// path so the supervisor can load_artifacts(path) to read it directly.
 		if verdict == VerdictDone && resolved != "" {
 			dispatchSeq := getDispatchSeq(sessionID, dispatchIdx)
 			setActiveArtifact(tctx, pm.station, resolved, dispatchSeq)
+			pm.persist.SaveFileArtifact(tctx, resolved)
 		}
 
 		if isError {
