@@ -50,16 +50,22 @@ func readCappedFile(path string) (string, bool, error) {
 	}
 	defer f.Close()
 
-	buf := make([]byte, maxReadFileBytes)
+	// Read one byte past the cap so we can detect truncation from the read
+	// itself, without trusting info.Size() (unreliable for /proc, /sys,
+	// network shares, or files mutated between Stat and Open).
+	buf := make([]byte, maxReadFileBytes+1)
 	n, err := io.ReadFull(f, buf)
 	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
 		return "", false, err
+	}
+	truncated := n > maxReadFileBytes
+	if truncated {
+		n = maxReadFileBytes
 	}
 	data := buf[:n]
 	if bytes.IndexByte(data, 0) >= 0 {
 		return "", false, fmt.Errorf("file appears to be binary")
 	}
-	truncated := info.Size() > int64(n)
 	return string(data), truncated, nil
 }
 
@@ -89,7 +95,11 @@ func resolveWithinRoots(roots []string, rawPath string) (string, error) {
 		if r, err := filepath.EvalSymlinks(root); err == nil {
 			root = r
 		}
-		if abs == root || strings.HasPrefix(abs, root+string(filepath.Separator)) {
+		// filepath.Rel is the cross-platform containment check: a rel of "."
+		// means abs == root, and anything not starting with ".." stays inside.
+		// Avoids HasPrefix edge cases at filesystem roots ("/" or "C:\").
+		rel, err := filepath.Rel(root, abs)
+		if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return abs, nil
 		}
 	}

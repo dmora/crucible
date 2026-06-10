@@ -67,6 +67,32 @@ func TestResolveWithinRoots(t *testing.T) {
 			t.Fatalf("expected second root to be allowed, got %v", err)
 		}
 	})
+
+	t.Run("sibling dir sharing a name prefix is rejected", func(t *testing.T) {
+		// e.g. root=".../proj" must not match ".../proj-evil/secret".
+		sibling := root + "-evil"
+		if err := os.MkdirAll(sibling, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		f := filepath.Join(sibling, "secret")
+		if err := os.WriteFile(f, []byte("nope"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := resolveWithinRoots([]string{root}, f); err == nil {
+			t.Fatal("expected sibling-prefix path to be rejected")
+		}
+	})
+
+	t.Run("root itself resolves to root", func(t *testing.T) {
+		got, err := resolveWithinRoots([]string{root}, root)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want, _ := filepath.EvalSymlinks(filepath.Clean(root))
+		if got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
 }
 
 func TestReadCappedFile(t *testing.T) {
@@ -114,6 +140,40 @@ func TestReadCappedFile(t *testing.T) {
 		}
 		if !truncated {
 			t.Fatal("expected truncated=true")
+		}
+		if len(content) != maxReadFileBytes {
+			t.Fatalf("expected content capped at %d, got %d", maxReadFileBytes, len(content))
+		}
+	})
+
+	t.Run("file exactly at cap is not truncated", func(t *testing.T) {
+		p := filepath.Join(dir, "exact.txt")
+		if err := os.WriteFile(p, []byte(strings.Repeat("a", maxReadFileBytes)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		content, truncated, err := readCappedFile(p)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if truncated {
+			t.Fatal("expected truncated=false for file exactly at cap")
+		}
+		if len(content) != maxReadFileBytes {
+			t.Fatalf("expected %d bytes, got %d", maxReadFileBytes, len(content))
+		}
+	})
+
+	t.Run("file one byte over cap is truncated", func(t *testing.T) {
+		p := filepath.Join(dir, "over.txt")
+		if err := os.WriteFile(p, []byte(strings.Repeat("a", maxReadFileBytes+1)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		content, truncated, err := readCappedFile(p)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !truncated {
+			t.Fatal("expected truncated=true for file one byte over cap")
 		}
 		if len(content) != maxReadFileBytes {
 			t.Fatalf("expected content capped at %d, got %d", maxReadFileBytes, len(content))
